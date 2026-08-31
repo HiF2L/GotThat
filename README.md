@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
 # 🧠 GotThat? (GotIt Core Tutor)
 
@@ -10,17 +10,12 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.2-3178C6.svg?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind-3.4-38B2AC.svg?logo=tailwind-css&logoColor=white)](https://tailwindcss.com)
 [![SQLAlchemy Async](https://img.shields.io/badge/SQLAlchemy-2.0%20Async-D71F00.svg)](https://docs.sqlalchemy.org)
-[![Pytest Passed](https://img.shields.io/badge/Tests-28%20Passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org)
+[![Pytest Passed](https://img.shields.io/badge/Tests-29%20Passed-brightgreen.svg?logo=pytest&logoColor=white)](https://pytest.org)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](LICENSE)
 
-[Интерфейс и скриншоты](#-галерея-интерфейса) • [Архитектура](#-системная-архитектура) • [Инновации](#-ключевые-технологические-инновации) • [Быстрый старт](#-быстрый-старт) • [Лицензия](#-лицензия-и-некоммерческое-использование)
+[Интерфейс и скриншоты](#-галерея-интерфейса) • [Архитектура](#-системная-архитектура) • [Инновации](#-ключевые-технологические-инновации) • [Быстрый старт](#-быстрый-старт) • [Лицензия](#-лицензия)
 
 </div>
-
----
-
-> [!CAUTION]
-> **НЕКОММЕРЧЕСКОЕ ИСПОЛЬЗОВАНИЕ**: Данный проект распространяется под лицензией **CC BY-NC-SA 4.0** исключительно для образовательных, исследовательских и личных целей. Коммерческое использование, интеграция в платные сервисы или перепродажа строго запрещены.
 
 ---
 
@@ -325,7 +320,7 @@ python -m pytest -v
 
 ---
 
-## 📜 Лицензия и некоммерческое использование
+## 📜 Лицензия
 
 Данный проект распространяется под лицензией **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)**.
 
