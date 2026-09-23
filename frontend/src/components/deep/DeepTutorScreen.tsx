@@ -71,6 +71,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   const [selectedProbeOptionId, setSelectedProbeOptionId] = useState<string | null>(null);
   const [loadingProgress, setLoadingProgress] = useState<number>(15);
   const [loadingTimeLeft, setLoadingTimeLeft] = useState<number>(8);
+  const [streamingContent, setStreamingContent] = useState<string>('');
 
   useEffect(() => {
     if (!loading) {
@@ -361,11 +362,44 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     isNavigatingRef.current = true;
     loadedTargetRef.current = conceptId;
     setLoading(true);
-    setLoadingMessage('Загрузка урока из базы знаний...');
+    setStreamingContent('');
+    setLoadingMessage('Синтез урока в реальном времени...');
     try {
       if (sessionId && dagPlan?.nodes?.some((n) => n.id === conceptId || n.slug === conceptId)) {
-        const action = await apiClient.selectStep(sessionId, conceptId, yapNote);
-        handleTutorActionResponse(action, sessionId);
+        try {
+          await apiClient.streamLessonStep(
+            sessionId,
+            conceptId,
+            yapNote,
+            (token) => {
+              setStreamingContent((prev) => prev + token);
+            },
+            (step) => {
+              setCurrentStep(step);
+              const activeConceptKey = step.concept_id;
+              loadedTargetRef.current = activeConceptKey;
+              if (onActiveConceptChange) {
+                onActiveConceptChange(
+                  activeConceptKey,
+                  step.track_slug || step.track_id
+                );
+              }
+              setLoading(false);
+              setStreamingContent('');
+            },
+            (err) => {
+              console.warn('Streaming step fallback to selectStep:', err);
+              apiClient.selectStep(sessionId, conceptId, yapNote).then((action) => {
+                handleTutorActionResponse(action, sessionId);
+              });
+            }
+          );
+          return;
+        } catch (streamErr) {
+          console.warn('Streaming step error, falling back to selectStep:', streamErr);
+          const action = await apiClient.selectStep(sessionId, conceptId, yapNote);
+          handleTutorActionResponse(action, sessionId);
+        }
       } else {
         const sessionRes = await apiClient.startDeepSession(userId, conceptId, yapNote, language);
         if (sessionRes.session_id) {
@@ -375,8 +409,9 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       }
     } catch (err) {
       console.error('Failed to switch concept:', err);
-    } finally {
       setLoading(false);
+      setStreamingContent('');
+    } finally {
       isNavigatingRef.current = false;
     }
   };
@@ -566,6 +601,22 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               />
             </div>
           </div>
+
+          {streamingContent && (
+            <div className="mt-4 pt-4 border-t border-slate-800 space-y-3 animate-fadeIn">
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  Прямая трансляция генерации
+                </span>
+                <span className="text-[11px] text-slate-500">Стриминг токенов без задержки</span>
+              </div>
+              <div className="max-h-80 overflow-y-auto pr-2 rounded-xl bg-surface-950/70 p-4 border border-slate-800/80 text-sm text-slate-200 leading-relaxed font-sans prose prose-invert max-w-none">
+                <LatexRenderer content={streamingContent} />
+                <span className="inline-block w-1.5 h-4 ml-1 bg-indigo-400 animate-pulse align-middle" />
+              </div>
+            </div>
+          )}
         </div>
       )}
 

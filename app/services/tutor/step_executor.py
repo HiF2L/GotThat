@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, AsyncGenerator
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.ontology import Concept, AssessmentItem, Track
@@ -481,7 +481,8 @@ class StepExecutor:
             messages=messages,
             model=active_model,
             temperature=0.25,
-            timeout_seconds=100.0,
+            timeout_seconds=120.0,
+            task_type="step_teaching",
         )
 
         explanation = ""
@@ -734,7 +735,7 @@ class StepExecutor:
                         explanation_context=explanation,
                         target_aspect=visual_desc,
                     ),
-                    timeout=15.0,
+                    timeout=35.0,
                 )
             except Exception as e:
                 logger.warning(f"SVG visualizer timed out or failed: {e}")
@@ -837,6 +838,7 @@ class StepExecutor:
                     ],
                     model=settings.FAST_MODEL,
                     temperature=0.2,
+                    task_type="step_quiz_fallback",
                 )
                 if q_res and q_res.get("options"):
                     opts = [
@@ -1064,6 +1066,228 @@ class StepExecutor:
             remediation_node_inserted=remediation_node,
             next_step_ready=is_correct,
         )
+
+    async def stream_step(
+        self,
+        session: AsyncSession,
+        deep_session: DeepLearningSession,
+        concept: Concept,
+        step_sequence: int,
+        user_notes: str = "",
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Live-streaming step generator using Server-Sent Events.
+        Tokens stream in real time (first tokens in 1-2s), completely preventing HTTP timeouts.
+        Captures final usage metrics into AICostTracker.
+        """
+        # 1. Immediate SQLite Cache Check
+        existing_step_res = await session.execute(
+            select(DeepSessionStep)
+            .where(
+                and_(
+                    DeepSessionStep.session_id == deep_session.id,
+                    DeepSessionStep.concept_id == concept.id,
+                )
+            )
+            .order_by(DeepSessionStep.step_sequence.desc())
+        )
+        existing_step = existing_step_res.scalars().first()
+        if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
+            payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+            yield {"type": "ready", "step": payload.model_dump()}
+            return
+
+        yield {"type": "status", "message": f"Синтез урока: {concept.title}..."}
+
+        # 2. Gather progression context
+        track_title = "Курс"
+        track_wishes = None
+        if concept and concept.track_id:
+            try:
+                t_res = await session.execute(select(Track).where(Track.id == concept.track_id))
+                t_obj = t_res.scalars().first()
+                if t_obj:
+                    if t_obj.title:
+                        track_title = t_obj.title
+                    if t_obj.user_wishes:
+                        track_wishes = t_obj.user_wishes
+            except Exception:
+                pass
+
+        planned_nodes = (deep_session.planned_dag or {}).get("nodes", [])
+        total_steps = len(planned_nodes) or 1
+        prior_steps_overview = []
+        for i, pn in enumerate(planned_nodes[:max(0, step_sequence - 1)]):
+            prior_steps_overview.append(f"• Урок {i+1} [{pn.get('code', '')}]: {pn.get('title', '')}")
+        prior_lessons_str = "\n".join(prior_steps_overview) if prior_steps_overview else "Это самый первый урок курса."
+
+        upcoming_nodes = planned_nodes[step_sequence:step_sequence + 3]
+        upcoming_str = ", ".join([f"[{un.get('code', '')}] {un.get('title', '')}" for un in upcoming_nodes]) if upcoming_nodes else "Завершающие разделы курса."
+
+        student_notes_prompt = ""
+        if user_notes and user_notes.strip():
+            student_notes_prompt = (
+                f"\nSTUDENT'S EXPLICIT REASONING / WISHES FOR THIS STEP:\n"
+                f"\"{user_notes.strip()}\"\n"
+                f"PEDAGOGICAL DIRECTIVE: Weave this student reflection into the explanation and examples where natural!\n"
+            )
+
+        wishes_context = f"Student Course Wishes: {track_wishes}\n" if track_wishes else ""
+
+        anti_repetition_mandate = (
+            f"PROGRESSIVE COURSE CONTEXT:\n"
+            f"• Course: «{track_title}»\n"
+            f"• Current Position: Lesson Step {step_sequence} of {total_steps}\n"
+            f"• Already Mastered Lessons in this Course:\n{prior_lessons_str}\n"
+            f"• Upcoming Lessons: {upcoming_str}\n\n"
+            f"CRITICAL DIRECTIVES:\n"
+            f"- Jump DIRECTLY and EXCLUSIVELY into the specific mechanics and insights of '{concept.title}' ({concept.code}).\n"
+            f"- Never repeat basic background or field introductions already covered earlier.\n"
+        )
+
+        target_lang = getattr(deep_session, "language", None) or "ru"
+        is_russian = (target_lang == "ru") or any('\u0400' <= char <= '\u04FF' for char in (concept.title or ""))
+        if target_lang == "en":
+            is_russian = False
+
+        lang_mandate = (
+            "CRITICAL LANGUAGE MANDATE: You MUST write the ENTIRE explanation, headings, equations, and questions in RUSSIAN (Русский язык)."
+            if is_russian
+            else "CRITICAL LANGUAGE MANDATE: You MUST write the ENTIRE explanation, headings, and questions in ENGLISH."
+        )
+
+        active_model = settings.DEEP_MODEL
+        if deep_session and deep_session.user_id:
+            try:
+                user_res = await session.execute(
+                    select(User.preferred_model).where(User.id == deep_session.user_id)
+                )
+                pref = user_res.scalars().first()
+                if pref and pref.strip():
+                    active_model = pref.strip()
+            except Exception as e:
+                logger.warning(f"Could not query User.preferred_model: {e}")
+
+        system_prompt = (
+            "You are an elite, world-class personal mentor and master educator.\n"
+            "Generate an exhaustive, deeply intuitive, storytelling-driven atomic tutorial.\n"
+            "Format the entire tutorial directly in clean, rich Markdown (headings, bold, lists, LaTeX $$ formulas, code blocks).\n\n"
+            "At the very end of your response, after the entire tutorial text, output:\n"
+            "---QUIZ_JSON---\n"
+            "followed by a single JSON object testing comprehension:\n"
+            "{\"prompt\": \"...\", \"options\": [{\"id\": \"a\", \"text\": \"...\", \"is_correct\": true, \"explanation\": \"...\"}, {\"id\": \"b\", \"text\": \"...\", \"is_correct\": false, \"explanation\": \"...\"}]}\n"
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"{anti_repetition_mandate}\n"
+                    f"CURRENT ATOMIC CONCEPT TO TEACH: {concept.title} ({concept.code})\n"
+                    f"Concept Summary: {concept.summary}\n"
+                    f"{wishes_context}"
+                    f"{student_notes_prompt}"
+                    f"{lang_mandate}\n\n"
+                    "Generate the live tutorial in Markdown."
+                ),
+            },
+        ]
+
+        full_prose_parts: List[str] = []
+        quiz_buffer_parts: List[str] = []
+        in_quiz_section = False
+
+        async for chunk in ai_clients.generate_chat_stream(
+            messages=messages,
+            model=active_model,
+            temperature=0.25,
+            task_type="step_stream",
+        ):
+            if "---QUIZ_JSON---" in chunk or "---QUIZ" in chunk:
+                in_quiz_section = True
+                split_parts = chunk.split("---QUIZ", 1)
+                if split_parts[0]:
+                    full_prose_parts.append(split_parts[0])
+                    yield {"type": "token", "token": split_parts[0]}
+                if len(split_parts) > 1:
+                    quiz_buffer_parts.append(split_parts[1])
+                continue
+
+            if in_quiz_section:
+                quiz_buffer_parts.append(chunk)
+            else:
+                full_prose_parts.append(chunk)
+                yield {"type": "token", "token": chunk}
+
+        explanation = "".join(full_prose_parts).strip()
+        from app.services.ai.client import sanitize_markdown_text, extract_json_or_fallback
+        explanation = sanitize_markdown_text(explanation)
+        if not explanation:
+            explanation = f"### {concept.title}\n\n{concept.summary}"
+
+        # Parse Quiz
+        quiz_raw = "".join(quiz_buffer_parts).strip()
+        quiz_obj = extract_json_or_fallback(quiz_raw)
+        opts = []
+        if quiz_obj and isinstance(quiz_obj, dict):
+            raw_opts = quiz_obj.get("options") or []
+            for o in raw_opts:
+                if isinstance(o, dict):
+                    opts.append(
+                        QuizOption(
+                            id=str(o.get("id", "a")),
+                            text=str(o.get("text", "")),
+                            is_correct=bool(o.get("is_correct", False)),
+                            explanation=str(o.get("explanation", "")),
+                        )
+                    )
+
+        if not opts or len(opts) < 2:
+            prompt_text = f"Какое главное следствие вытекает из концепции «{concept.title}»?"
+            opts = [
+                QuizOption(id="a", text=f"Глубокое понимание фундаментальных принципов «{concept.title}»", is_correct=True, explanation="Верно"),
+                QuizOption(id="b", text="Полное отсутствие практической применимости", is_correct=False, explanation="Неверно"),
+            ]
+        else:
+            prompt_text = quiz_obj.get("prompt") or f"Проверка понимания: {concept.title}"
+
+        v_challenge = VerificationChallengeSchema(
+            item_id=f"lock_{concept.id}_{step_sequence}",
+            prompt_markdown=prompt_text,
+            options=opts,
+            allow_voice=True,
+        )
+
+        # Save to DB
+        new_step = DeepSessionStep(
+            session_id=deep_session.id,
+            concept_id=concept.id,
+            step_sequence=step_sequence,
+            step_type="explanation",
+            explanation_markdown=explanation,
+            visual_type=None,
+            visual_payload=None,
+            visual_alt=None,
+            verification_challenge=v_challenge.model_dump(),
+            verification_passed=False,
+        )
+        session.add(new_step)
+        await session.commit()
+        await session.refresh(new_step)
+
+        # Trigger background prefetch for step N+1
+        asyncio.create_task(
+            self.prefetch_next_step(
+                deep_session_id=deep_session.id,
+                current_concept_index=step_sequence - 1,
+                target_lang=getattr(deep_session, "language", None) or "ru",
+                user_notes=user_notes,
+            )
+        )
+
+        payload = self._build_step_payload_from_db(new_step, concept, deep_session, step_sequence)
+        yield {"type": "ready", "step": payload.model_dump()}
 
 
 step_executor = StepExecutor()

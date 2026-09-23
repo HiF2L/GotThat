@@ -64,6 +64,7 @@ class AISafetyClassifier(BaseModerationProvider):
                 model=settings.FAST_MODEL,
                 temperature=0.0,
                 timeout_seconds=8.0,
+                task_type="moderation_guard",
             )
 
             is_safe = bool(raw_result.get("is_safe", True))

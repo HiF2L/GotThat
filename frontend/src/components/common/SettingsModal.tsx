@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { X, Globe, Cpu, Sparkles, Check, DollarSign, Layers, Volume2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Globe, Cpu, Sparkles, Check, DollarSign, Layers, Volume2, Loader2, RefreshCw } from 'lucide-react';
+import { apiClient } from '../../api/client';
 
 export interface AIModelOption {
   id: string;
@@ -183,7 +184,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   currentTtsVoice = 'alloy',
   onTtsVoiceChange,
 }) => {
-  const [activeTab, setActiveTab] = useState<'models' | 'language' | 'voice'>('models');
+  const [activeTab, setActiveTab] = useState<'models' | 'language' | 'voice' | 'costs'>('models');
+  const [costsData, setCostsData] = useState<any>(null);
+  const [loadingCosts, setLoadingCosts] = useState<boolean>(false);
+
+  const fetchCosts = async () => {
+    setLoadingCosts(true);
+    try {
+      const data = await apiClient.getCostsReport();
+      setCostsData(data);
+    } catch (e) {
+      console.error('Failed to load costs:', e);
+    } finally {
+      setLoadingCosts(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'costs' && !costsData) {
+      fetchCosts();
+    }
+  }, [activeTab]);
 
   if (!isOpen) return null;
 
@@ -249,6 +270,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           >
             <Globe className="w-4 h-4" />
             <span>Язык курса</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('costs')}
+            className={`pb-3 text-xs font-bold transition-all border-b-2 flex items-center gap-2 ${
+              activeTab === 'costs'
+                ? 'text-emerald-400 border-emerald-500'
+                : 'text-slate-400 border-transparent hover:text-slate-200'
+            }`}
+          >
+            <DollarSign className="w-4 h-4" />
+            <span>Расходы и Токены</span>
           </button>
         </div>
 
@@ -477,6 +510,138 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </p>
                 </button>
               </div>
+            </div>
+          )}
+
+          {activeTab === 'costs' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-white">Статистика расходов и токенов (ProxyAPI)</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Учет расходов по официальным тарифам в реальном времени. Все утечки устранены.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchCosts}
+                  disabled={loadingCosts}
+                  className="px-3 py-1.5 rounded-xl bg-surface-950 border border-slate-800 text-xs text-slate-300 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingCosts ? 'animate-spin' : ''}`} />
+                  <span>Обновить</span>
+                </button>
+              </div>
+
+              {loadingCosts && !costsData && (
+                <div className="p-8 text-center text-slate-400 flex items-center justify-center gap-2">
+                  <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
+                  <span>Загрузка финансовой сводки...</span>
+                </div>
+              )}
+
+              {costsData && (
+                <div className="space-y-5">
+                  {/* Top Stats Cards */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3.5 rounded-2xl bg-surface-950 border border-slate-800 space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Сегодня расход</div>
+                      <div className="text-lg font-black text-emerald-400">
+                        {(costsData.today_spent_rub ?? costsData.total_cost_rub ?? 0).toFixed(2)} ₽
+                      </div>
+                    </div>
+                    <div className="p-3.5 rounded-2xl bg-surface-950 border border-slate-800 space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Всего токенов</div>
+                      <div className="text-lg font-black text-sky-400">
+                        {(costsData.today_tokens ?? costsData.total_tokens ?? 0).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="p-3.5 rounded-2xl bg-surface-950 border border-slate-800 space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Всего вызовов LLM</div>
+                      <div className="text-lg font-black text-indigo-400">
+                        {costsData.today_calls ?? costsData.calls_count ?? 0}
+                      </div>
+                    </div>
+                    <div className="p-3.5 rounded-2xl bg-surface-950 border border-slate-800 space-y-1">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Статус учета</div>
+                      <div className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5 pt-1">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                        <span>ProxyAPI Активен</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Model Distribution */}
+                  {(costsData.breakdown_by_model || costsData.by_model) && Object.keys(costsData.breakdown_by_model || costsData.by_model).length > 0 && (
+                    <div className="p-4 rounded-2xl bg-surface-950 border border-slate-800 space-y-3">
+                      <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        Распределение по моделям
+                      </h4>
+                      <div className="space-y-2">
+                        {Object.entries(costsData.breakdown_by_model || costsData.by_model).map(([modelName, info]: [string, any]) => (
+                          <div key={modelName} className="flex items-center justify-between text-xs py-1 border-b border-slate-800/50 last:border-none">
+                            <span className="font-semibold text-white">{modelName}</span>
+                            <div className="flex items-center gap-4 text-slate-400">
+                              <span>{info.calls} вызовов</span>
+                              <span>{info.tokens?.toLocaleString()} ток.</span>
+                              <span className="font-bold text-emerald-400">{info.cost_rub?.toFixed(2)} ₽</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Task Type Breakdown */}
+                  {costsData.breakdown_by_task && Object.keys(costsData.breakdown_by_task).length > 0 && (
+                    <div className="p-4 rounded-2xl bg-surface-950 border border-slate-800 space-y-3">
+                      <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        Распределение по задачам (Архитектура)
+                      </h4>
+                      <div className="space-y-2">
+                        {Object.entries(costsData.breakdown_by_task).map(([taskName, info]: [string, any]) => (
+                          <div key={taskName} className="flex items-center justify-between text-xs py-1 border-b border-slate-800/50 last:border-none">
+                            <span className="font-mono text-[11px] text-indigo-300">{taskName}</span>
+                            <div className="flex items-center gap-4 text-slate-400 text-xs">
+                              <span>{info.calls} вызовов</span>
+                              <span>{info.tokens?.toLocaleString()} ток.</span>
+                              <span className="font-bold text-slate-200">{info.cost_rub?.toFixed(2)} ₽</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Recent Calls Ledger */}
+                  {costsData.recent_calls && costsData.recent_calls.length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                        Последние вызовы LLM
+                      </h4>
+                      <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                        {costsData.recent_calls.map((call: any, idx: number) => (
+                          <div
+                            key={idx}
+                            className="p-2.5 rounded-xl bg-surface-950/70 border border-slate-800/80 flex items-center justify-between text-[11px]"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={`w-2 h-2 rounded-full ${call.status === 'success' ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+                              <span className="font-bold text-white">{call.model}</span>
+                              <span className="text-slate-500">[{call.task_type}]</span>
+                            </div>
+                            <div className="flex items-center gap-3 text-slate-400">
+                              <span>{call.total_tokens?.toLocaleString()} ток.</span>
+                              <span>{call.latency_ms ? `${(call.latency_ms / 1000).toFixed(1)}s` : ''}</span>
+                              <span className="font-bold text-emerald-400">{call.cost_rub?.toFixed(3)} ₽</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

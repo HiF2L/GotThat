@@ -186,7 +186,11 @@ class FeedOrchestrator:
                 "content": f"Concept: {concept.title}\nSummary: {concept.summary}",
             },
         ]
-        generated = await ai_clients.generate_json(messages=messages, model=settings.FAST_MODEL)
+        generated = await ai_clients.generate_json(
+            messages=messages,
+            model=settings.FAST_MODEL,
+            task_type="feed_quiz",
+        )
 
         item = AssessmentItem(
             id=str(uuid.uuid4()),

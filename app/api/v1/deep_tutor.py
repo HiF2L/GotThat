@@ -1,4 +1,6 @@
 import logging
+import json
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional
@@ -16,6 +18,7 @@ from app.models.session import DeepLearningSession, DeepSessionStep
 from app.models.ontology import Concept
 from app.config import settings
 from app.services.ai.client import ai_clients
+from app.services.ai.cost_tracker import cost_tracker
 from app.services.moderation import moderation_service
 from sqlalchemy import select, and_, delete
 
@@ -395,5 +398,87 @@ async def synthesize_lesson_speech(
     except Exception as e:
         logger.error(f"TTS synthesis error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"TTS synthesis failed: {e}")
+
+
+class StreamStepRequest(BaseModel):
+    session_id: str
+    concept_id: Optional[str] = None
+    user_notes: Optional[str] = None
+
+
+@router.post("/stream-step")
+async def stream_lesson_step(
+    request: StreamStepRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Live Server-Sent Events (SSE) streaming of a lesson tutorial.
+    Tokens stream in real time (within 1-2s), preventing timeouts and showing progress live.
+    """
+    session_res = await db.execute(
+        select(DeepLearningSession).where(DeepLearningSession.id == request.session_id)
+    )
+    deep_session = session_res.scalars().first()
+    if not deep_session:
+        raise HTTPException(status_code=404, detail="Сессия обучения не найдена.")
+
+    target_cid = request.concept_id or deep_session.current_concept_id
+    if not target_cid and deep_session.planned_dag:
+        nodes = deep_session.planned_dag.get("nodes", [])
+        if nodes:
+            idx = min(deep_session.current_concept_index, len(nodes) - 1)
+            target_cid = nodes[idx].get("id")
+
+    concept_res = await db.execute(select(Concept).where(Concept.id == target_cid))
+    concept = concept_res.scalars().first()
+    if not concept:
+        raise HTTPException(status_code=404, detail="Концепция урока не найдена.")
+
+    step_seq = (deep_session.current_concept_index or 0) + 1
+    if deep_session.planned_dag and deep_session.planned_dag.get("nodes"):
+        for i, n in enumerate(deep_session.planned_dag["nodes"]):
+            if n.get("id") == concept.id or n.get("concept_id") == concept.id:
+                step_seq = i + 1
+                break
+
+    async def event_generator():
+        try:
+            async for event in step_executor.stream_step(
+                session=db,
+                deep_session=deep_session,
+                concept=concept,
+                step_sequence=step_seq,
+                user_notes=request.user_notes or "",
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            logger.error(f"Error in stream_step generator: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/costs")
+async def get_costs_overview(
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Returns today's comprehensive AI expenditures, token breakdown,
+    model distribution, and recent call ledger from SQLite.
+    """
+    try:
+        return await cost_tracker.get_cost_summary(db)
+    except Exception as e:
+        logger.error(f"Failed to fetch costs summary: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 

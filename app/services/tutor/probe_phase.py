@@ -122,6 +122,7 @@ class ProbePhaseManager:
             messages=messages,
             model=settings.FAST_MODEL,
             temperature=0.25,
+            task_type="probe_suite",
         )
 
         raw_questions = (

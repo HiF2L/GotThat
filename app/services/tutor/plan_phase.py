@@ -153,7 +153,8 @@ class PlanPhaseManager:
                 model=active_plan_model,
                 temperature=0.25,
                 max_tokens=14000,
-                timeout_seconds=55.0,
+                timeout_seconds=120.0,
+                task_type="plan_generation",
             )
 
             raw_concepts = plan_data.get("concepts", [])
@@ -427,6 +428,8 @@ class PlanPhaseManager:
                 model=getattr(settings, "PLAN_MODEL", settings.DEEP_MODEL),
                 temperature=0.25,
                 max_tokens=14000,
+                timeout_seconds=120.0,
+                task_type="plan_expand",
             )
 
             raw_concepts = plan_data.get("concepts", [])

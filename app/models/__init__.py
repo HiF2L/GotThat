@@ -21,6 +21,7 @@ from app.models.session import (
     DeepLearningSession,
     DeepSessionStep,
 )
+from app.models.usage import AIUsageLog
 
 __all__ = [
     "Domain",
@@ -40,4 +41,5 @@ __all__ = [
     "ConceptReaction",
     "DeepLearningSession",
     "DeepSessionStep",
+    "AIUsageLog",
 ]

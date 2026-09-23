@@ -60,6 +60,8 @@ class VisualizerSubagent:
                 messages=messages,
                 model=settings.FAST_MODEL,
                 temperature=0.2,
+                timeout_seconds=35.0,
+                task_type="svg_visualization",
             )
             raw_svg = result.get("svg_code", "")
             alt_text = result.get("alt_text", f"Circuit diagram for {concept_title}")

@@ -2,11 +2,24 @@ import logging
 import asyncio
 import json
 import re
-from typing import Dict, Any, Optional, List
+import time
+from typing import Dict, Any, Optional, List, AsyncGenerator
 from openai import AsyncOpenAI
 from app.config import settings
+from app.services.ai.cost_tracker import cost_tracker
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    if isinstance(val, int) and not isinstance(val, bool):
+        return val
+    try:
+        if isinstance(val, (float, str)):
+            return int(val)
+    except Exception:
+        pass
+    return default
 
 
 def _safe_json_loads(candidate: str) -> Optional[Any]:
@@ -233,6 +246,50 @@ class AIClientManager:
 
         return clean
 
+    def _prepare_kwargs(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = 0.3,
+        response_format: Optional[Dict[str, str]] = None,
+        max_tokens: Optional[int] = None,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Dynamically adjusts kwargs according to model capabilities and ProxyAPI quirks:
+        - moonshotai/kimi-k3 rejects custom temperature (HTTP 400).
+        - o1/o3 reasoning models reject temperature and require max_completion_tokens.
+        - stream_options: includes token usage in the final stream chunk.
+        """
+        clean_model = self.normalize_model_name(model)
+        kwargs: Dict[str, Any] = {
+            "model": clean_model,
+            "messages": messages,
+        }
+
+        # Temperature handling
+        is_kimi = "kimi" in clean_model
+        is_reasoning_o_series = any(p in clean_model for p in ["/o1", "/o3", "/o4", "o1-", "o3-"])
+
+        if not is_kimi and not is_reasoning_o_series and temperature is not None:
+            kwargs["temperature"] = temperature
+
+        # Token limits
+        if max_tokens:
+            if is_reasoning_o_series:
+                kwargs["max_completion_tokens"] = max_tokens
+            else:
+                kwargs["max_tokens"] = max_tokens
+
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        if stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+
+        return kwargs
+
     async def generate_chat(
         self,
         messages: List[Dict[str, str]],
@@ -241,62 +298,202 @@ class AIClientManager:
         response_format: Optional[Dict[str, str]] = None,
         max_tokens: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        task_type: str = "general_chat",
     ) -> str:
         raw_model = model or settings.FAST_MODEL
         chosen_model = self.normalize_model_name(raw_model)
 
-        # Primary model is attempted first with full allowance
-        candidate_models = [chosen_model]
-        # Fast, proven fallback models if primary model times out
-        for fb in ["google/gemini-2.5-flash", "google/gemini-3-flash-preview", "openai/gpt-4.1-mini"]:
-            if fb not in candidate_models:
-                candidate_models.append(fb)
+        # Allow generous timeout for primary model (up to 120s for reasoning/deep models)
+        call_timeout = timeout_seconds or 120.0
+        start_time = time.time()
 
+        try:
+            kwargs = self._prepare_kwargs(
+                model=chosen_model,
+                messages=messages,
+                temperature=temperature,
+                response_format=response_format,
+                max_tokens=max_tokens,
+            )
 
-        last_error = None
-        for idx, candidate in enumerate(candidate_models):
-            # Primary model gets 100s (or caller timeout); fallbacks get 30s
-            call_timeout = (timeout_seconds or 100.0) if idx == 0 else 30.0
+            response = await asyncio.wait_for(
+                self.main_client.chat.completions.create(**kwargs),
+                timeout=call_timeout,
+            )
 
-            try:
-                kwargs: Dict[str, Any] = {
-                    "model": candidate,
-                    "messages": messages,
-                    "temperature": temperature,
-                }
-                if response_format:
-                    kwargs["response_format"] = response_format
-                if max_tokens:
-                    kwargs["max_tokens"] = max_tokens
+            latency_ms = int((time.time() - start_time) * 1000)
+            choices = getattr(response, "choices", [])
+            if not choices or not choices[0].message:
+                raise ValueError(f"Model '{chosen_model}' returned empty choices")
 
-                response = await asyncio.wait_for(
-                    self.main_client.chat.completions.create(**kwargs),
-                    timeout=call_timeout,
-                )
-                choices = getattr(response, "choices", [])
-                if not choices or not choices[0].message:
-                    raise ValueError(f"Model '{candidate}' returned empty choices")
+            msg = choices[0].message
+            content = (getattr(msg, "content", None) or "").strip()
 
-                msg = choices[0].message
-                content = (getattr(msg, "content", None) or "").strip()
-                
-                # If content is empty but model produced reasoning_content (e.g. DeepSeek/o1)
-                if not content and hasattr(msg, "reasoning_content") and getattr(msg, "reasoning_content", None):
-                    content = str(msg.reasoning_content).strip()
+            # If content is empty but model produced reasoning_content (e.g. DeepSeek/o1)
+            if not content and hasattr(msg, "reasoning_content") and getattr(msg, "reasoning_content", None):
+                content = str(msg.reasoning_content).strip()
 
-                if not content:
-                    raise ValueError(f"Model '{candidate}' returned empty content")
+            if not content:
+                raise ValueError(f"Model '{chosen_model}' returned empty content")
 
-                return content
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    f"Model '{candidate}' call failed after {call_timeout}s timeout: {e}. Trying next candidate..."
-                )
-                continue
+            # Extract usage metrics
+            usage = getattr(response, "usage", None)
+            prompt_tokens = _safe_int(getattr(usage, "prompt_tokens", 0) if usage else 0)
+            completion_tokens = _safe_int(getattr(usage, "completion_tokens", 0) if usage else 0)
+            reasoning_tokens = 0
+            if usage and hasattr(usage, "completion_tokens_details"):
+                details = getattr(usage, "completion_tokens_details", None)
+                if details:
+                    reasoning_tokens = _safe_int(getattr(details, "reasoning_tokens", 0))
 
-        logger.error(f"All AI client fallback models failed. Last error: {last_error}")
-        raise RuntimeError(f"AI Generation failed across all fallback models: {last_error}")
+            # Record cost and tokens
+            await cost_tracker.record_usage(
+                task_type=task_type,
+                model=chosen_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+                latency_ms=latency_ms,
+                status="success",
+            )
+
+            return content
+
+        except asyncio.TimeoutError:
+            latency_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"[TIMEOUT] Primary model '{chosen_model}' timed out after {call_timeout}s.")
+            # Record timeout to ledger, do NOT cascade through 3 paid models!
+            await cost_tracker.record_usage(
+                task_type=task_type,
+                model=chosen_model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=latency_ms,
+                status="timeout",
+                error_message=f"Timeout after {call_timeout}s",
+            )
+            raise TimeoutError(f"Model '{chosen_model}' timed out after {call_timeout}s")
+
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000)
+            error_str = str(e)
+            logger.warning(f"Primary model '{chosen_model}' failed ({e}). Checking single safe fallback...")
+
+            # If it was an invalid request or connection error on primary, try AT MOST ONE cheap fallback
+            fallback_model = self.normalize_model_name(settings.FAST_MODEL)
+            if fallback_model != chosen_model:
+                try:
+                    fb_start = time.time()
+                    fb_kwargs = self._prepare_kwargs(
+                        model=fallback_model,
+                        messages=messages,
+                        temperature=temperature,
+                        response_format=response_format,
+                        max_tokens=max_tokens,
+                    )
+                    fb_resp = await asyncio.wait_for(
+                        self.main_client.chat.completions.create(**fb_kwargs),
+                        timeout=45.0,
+                    )
+                    fb_latency = int((time.time() - fb_start) * 1000)
+                    fb_choices = getattr(fb_resp, "choices", [])
+                    if fb_choices and fb_choices[0].message:
+                        fb_content = (getattr(fb_choices[0].message, "content", None) or "").strip()
+                        if fb_content:
+                            usage = getattr(fb_resp, "usage", None)
+                            prompt_tokens = _safe_int(getattr(usage, "prompt_tokens", 0) if usage else 0)
+                            completion_tokens = _safe_int(getattr(usage, "completion_tokens", 0) if usage else 0)
+                            await cost_tracker.record_usage(
+                                task_type=f"{task_type}_fallback",
+                                model=fallback_model,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                latency_ms=fb_latency,
+                                status="success",
+                                details={"primary_model_failed": chosen_model, "primary_error": error_str},
+                            )
+                            return fb_content
+                except Exception as fb_err:
+                    logger.error(f"Fallback model '{fallback_model}' also failed: {fb_err}")
+
+            # Record failure in ledger
+            await cost_tracker.record_usage(
+                task_type=task_type,
+                model=chosen_model,
+                prompt_tokens=0,
+                completion_tokens=0,
+                latency_ms=latency_ms,
+                status="error",
+                error_message=error_str,
+            )
+            raise RuntimeError(f"AI generation failed for model '{chosen_model}': {e}")
+
+    async def generate_chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        task_type: str = "step_stream",
+    ) -> AsyncGenerator[str, None]:
+        """
+        Server-Sent Events / Chunked streaming method.
+        Keeps HTTP connection continuously active, eliminating timeouts.
+        Captures full usage statistics from the final chunk and logs to AICostTracker.
+        """
+        raw_model = model or settings.FAST_MODEL
+        chosen_model = self.normalize_model_name(raw_model)
+        start_time = time.time()
+
+        kwargs = self._prepare_kwargs(
+            model=chosen_model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+
+        response_stream = await self.main_client.chat.completions.create(**kwargs)
+        prompt_tokens = 0
+        completion_tokens = 0
+        reasoning_tokens = 0
+        status = "success"
+        error_msg = None
+
+        try:
+            async for chunk in response_stream:
+                choices = getattr(chunk, "choices", [])
+                if choices and choices[0].delta:
+                    delta_content = getattr(choices[0].delta, "content", None)
+                    if delta_content:
+                        yield delta_content
+                    elif hasattr(choices[0].delta, "reasoning_content") and getattr(choices[0].delta, "reasoning_content", None):
+                        yield str(choices[0].delta.reasoning_content)
+
+                if hasattr(chunk, "usage") and chunk.usage:
+                    u = chunk.usage
+                    prompt_tokens = _safe_int(getattr(u, "prompt_tokens", 0) or 0)
+                    completion_tokens = _safe_int(getattr(u, "completion_tokens", 0) or 0)
+                    if hasattr(u, "completion_tokens_details") and getattr(u, "completion_tokens_details", None):
+                        reasoning_tokens = _safe_int(getattr(u.completion_tokens_details, "reasoning_tokens", 0) or 0)
+
+        except Exception as e:
+            status = "error"
+            error_msg = str(e)
+            logger.error(f"Error during streaming from '{chosen_model}': {e}")
+            raise
+        finally:
+            latency_ms = int((time.time() - start_time) * 1000)
+            await cost_tracker.record_usage(
+                task_type=task_type,
+                model=chosen_model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+                latency_ms=latency_ms,
+                status=status,
+                error_message=error_msg,
+            )
 
     async def generate_json(
         self,
@@ -305,6 +502,7 @@ class AIClientManager:
         temperature: float = 0.2,
         max_tokens: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        task_type: str = "general_json",
     ) -> Dict[str, Any]:
         """
         Guaranteed JSON extraction from LLM responses with prompt instructions and robust fallback.
@@ -316,6 +514,7 @@ class AIClientManager:
             temperature=temperature,
             max_tokens=max_tokens or 8192,
             timeout_seconds=timeout_seconds,
+            task_type=task_type,
         )
         parsed = extract_json_or_fallback(content)
         if "raw_text" in parsed and len(parsed) == 1:
@@ -328,9 +527,10 @@ class AIClientManager:
                         },
                         {"role": "user", "content": content},
                     ],
-                    model="gemini-3-flash-preview",
+                    model="openai/gpt-4.1-mini",
                     temperature=0.0,
                     timeout_seconds=30.0,
+                    task_type="json_repair",
                 )
                 repaired = extract_json_or_fallback(repair_content)
                 if repaired and "raw_text" not in repaired:

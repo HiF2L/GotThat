@@ -454,4 +454,84 @@ export const apiClient = {
     if (!res.ok) throw new Error('Failed to update track organization');
     return res.json();
   },
+
+  async getCostsReport(): Promise<{
+    today_spent_rub: number;
+    today_tokens: number;
+    today_calls: number;
+    breakdown_by_task: Record<string, { cost_rub: number; calls: number; tokens: number }>;
+    breakdown_by_model: Record<string, { cost_rub: number; calls: number; tokens: number }>;
+    recent_calls: Array<{
+      id: string;
+      timestamp: string;
+      task_type: string;
+      model: string;
+      prompt_tokens: number;
+      completion_tokens: number;
+      reasoning_tokens: number;
+      total_tokens: number;
+      cost_rub: number;
+      latency_ms: number;
+      status: string;
+      error_message?: string;
+    }>;
+  }> {
+    const res = await fetch(`${API_BASE}/deep/costs`);
+    if (!res.ok) throw new Error('Failed to fetch costs report');
+    return res.json();
+  },
+
+  async streamLessonStep(
+    sessionId: string,
+    conceptId?: string,
+    userNotes?: string,
+    onToken?: (token: string) => void,
+    onReady?: (step: DeepStep) => void,
+    onError?: (err: any) => void
+  ): Promise<void> {
+    const res = await fetch(`${API_BASE}/deep/stream-step`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        concept_id: conceptId,
+        user_notes: userNotes,
+      }),
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error('Failed to start streaming step');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const event = JSON.parse(raw);
+            if (event.type === 'token' && onToken) {
+              onToken(event.token);
+            } else if (event.type === 'ready' && onReady) {
+              onReady(event.step);
+            } else if (event.type === 'error' && onError) {
+              onError(new Error(event.error));
+            }
+          } catch (e) {
+            // Ignore partial JSON
+          }
+        }
+      }
+    }
+  },
 };
