@@ -1,7 +1,9 @@
 import logging
 import json
+import asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional
 from app.core.database import get_db_session, async_session_maker
@@ -474,6 +476,145 @@ async def stream_lesson_step(
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except Exception as e:
                 logger.error(f"Error in stream_step generator: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+class StreamCurriculumRequest(BaseModel):
+    user_id: str
+    target_concept_id: str
+    initial_user_context: Optional[str] = None
+    language: Optional[str] = "ru"
+    depth_level: Optional[str] = None
+    skip_probing: Optional[bool] = True
+    session_id: Optional[str] = None
+
+
+@router.post("/stream-curriculum")
+async def stream_curriculum(
+    request: StreamCurriculumRequest,
+):
+    """
+    Live Server-Sent Events (SSE) streaming for course initialization & first lesson.
+    Streams planning activity logs continuously (heartbeat every second), preventing HTTP idle timeouts,
+    yields the planned DAG map, and seamlessly continues into live-streaming Lesson 1 tokens.
+    """
+    async def event_generator():
+        async with async_session_maker() as db:
+            try:
+                yield f"data: {json.dumps({'type': 'log', 'message': 'Инициализация учебного курса...'}, ensure_ascii=False)}\n\n"
+
+                if request.initial_user_context and request.initial_user_context.strip():
+                    await moderation_service.validate_or_raise(
+                        text=request.initial_user_context,
+                        context={"intent": "deep_session_init", "target_concept_id": request.target_concept_id},
+                    )
+
+                log_queue = asyncio.Queue()
+
+                async def on_plan_log(msg: str):
+                    await log_queue.put(msg)
+
+                yield f"data: {json.dumps({'type': 'log', 'message': 'Анализирую структуру курса и ключевые концепции...'}, ensure_ascii=False)}\n\n"
+
+                session = None
+                if request.session_id:
+                    s_res = await db.execute(
+                        select(DeepLearningSession).where(DeepLearningSession.id == request.session_id)
+                    )
+                    existing_session = s_res.scalars().first()
+                    if existing_session:
+                        existing_session.status = "planning"
+                        await db.commit()
+                        session = existing_session
+
+                if session:
+                    session_task = asyncio.create_task(
+                        tutor_state_machine.get_next_action(
+                            session=db,
+                            deep_session_id=session.id,
+                            user_notes=request.initial_user_context or "",
+                            on_progress=on_plan_log,
+                        )
+                    )
+                else:
+                    start_req = StartDeepSessionRequest(
+                        user_id=request.user_id,
+                        target_concept_id=request.target_concept_id,
+                        initial_user_context=request.initial_user_context,
+                        language=request.language or "ru",
+                        depth_level=request.depth_level,
+                        skip_probing=request.skip_probing if request.skip_probing is not None else True,
+                    )
+                    session_task = asyncio.create_task(
+                        tutor_state_machine.start_session(db, start_req, on_progress=on_plan_log)
+                    )
+
+                while not session_task.done():
+                    try:
+                        log_msg = await asyncio.wait_for(log_queue.get(), timeout=1.0)
+                        yield f"data: {json.dumps({'type': 'log', 'message': log_msg}, ensure_ascii=False)}\n\n"
+                    except asyncio.TimeoutError:
+                        # Send heartbeat ping to keep HTTP / Nginx socket streaming
+                        yield f"data: {json.dumps({'type': 'ping'}, ensure_ascii=False)}\n\n"
+
+                while not log_queue.empty():
+                    log_msg = log_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'log', 'message': log_msg}, ensure_ascii=False)}\n\n"
+
+                res_obj = await session_task
+                if isinstance(res_obj, dict):
+                    sid = res_obj.get("session_id") or (session.id if session else "")
+                    s_reload = await db.execute(select(DeepLearningSession).where(DeepLearningSession.id == sid))
+                    session = s_reload.scalars().first()
+                    dag_data = res_obj.get("dag") or (session.planned_dag if session else {})
+                    mermaid = res_obj.get("mermaid_diagram") or (session.mermaid_diagram if session else "")
+                else:
+                    session = res_obj
+                    dag_data = session.planned_dag
+                    mermaid = session.mermaid_diagram or (dag_data or {}).get("mermaid_code", "")
+
+                if session and session.status == "probing":
+                    next_act = await tutor_state_machine.get_next_action(
+                        session=db,
+                        deep_session_id=session.id,
+                        user_notes=request.initial_user_context or "",
+                    )
+                    yield f"data: {json.dumps({'type': 'probing', 'session_id': session.id, 'action': next_act}, ensure_ascii=False)}\n\n"
+                    return
+
+                # Plan is ready!
+                yield f"data: {json.dumps({'type': 'plan_ready', 'session_id': session.id, 'dag': dag_data, 'mermaid_diagram': mermaid}, ensure_ascii=False)}\n\n"
+
+                # Immediately begin streaming Lesson 1
+                nodes = (dag_data or {}).get("nodes", [])
+                if nodes:
+                    first_node = nodes[0]
+                    first_cid = first_node.get("id") or first_node.get("concept_id")
+                    c_res = await db.execute(select(Concept).where(Concept.id == first_cid))
+                    active_concept = c_res.scalars().first()
+
+                    if active_concept:
+                        yield f"data: {json.dumps({'type': 'lesson_start', 'concept_id': active_concept.id, 'title': active_concept.title}, ensure_ascii=False)}\n\n"
+                        async for event in step_executor.stream_step(
+                            session=db,
+                            deep_session=session,
+                            concept=active_concept,
+                            step_sequence=1,
+                            user_notes=request.initial_user_context or "",
+                        ):
+                            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                logger.error(f"Error in stream_curriculum: {e}", exc_info=True)
                 yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

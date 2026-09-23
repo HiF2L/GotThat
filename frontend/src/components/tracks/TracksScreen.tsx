@@ -203,7 +203,6 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
 
   const handleTrackCreated = async (newTrack: TrackSummary, startMode: 'quiz' | 'direct' = 'quiz') => {
     await loadData();
-    await handleSelectTrack(newTrack.slug || newTrack.track_id, true);
     // Immediately open Deep Tutor in user's chosen start mode!
     onSelectTrackForDeepStudy(
       newTrack.slug || newTrack.track_id,

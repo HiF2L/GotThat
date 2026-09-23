@@ -339,6 +339,7 @@ class TutorStateMachine:
         self,
         session: AsyncSession,
         request: StartDeepSessionRequest,
+        on_progress: Optional[Any] = None,
     ) -> DeepLearningSession:
         # 1. Resolve user ID
         user_res = await session.execute(select(User).where(User.id == request.user_id))
@@ -546,6 +547,7 @@ class TutorStateMachine:
                 probing_transcript=None,  # Clean start without probe skips
                 language=session_lang,
                 depth_level=session_depth,
+                on_progress=on_progress,
             )
 
             reconciled_dag, active_idx, active_cid, is_all_completed = await self.reconcile_dag_with_mastery(
@@ -690,6 +692,12 @@ class TutorStateMachine:
                 deep_session.status = "planning"
 
         await session.commit()
+        if deep_session.status == "planning":
+            return {
+                "phase": "plan_needed",
+                "session_id": deep_session.id,
+                "message": "Диагностика завершена. Переходим к составлению учебного плана...",
+            }
         return await self.get_next_action(session, deep_session_id)
 
     async def get_next_action(
@@ -697,6 +705,7 @@ class TutorStateMachine:
         session: AsyncSession,
         deep_session_id: str,
         user_notes: str = "",
+        on_progress: Optional[Any] = None,
     ) -> Dict[str, Any]:
         session_res = await session.execute(
             select(DeepLearningSession).where(DeepLearningSession.id == deep_session_id)
@@ -756,6 +765,7 @@ class TutorStateMachine:
                 probing_transcript=deep_session.probing_state,
                 language=getattr(deep_session, "language", None) or "ru",
                 depth_level=getattr(deep_session, "depth_level", "high") or "high",
+                on_progress=on_progress,
             )
 
             # Reconcile DAG with actual user mastery

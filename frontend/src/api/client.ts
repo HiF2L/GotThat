@@ -6,6 +6,7 @@ import {
   UserMasteryOverview,
   DeepStepResult,
   DeepStep,
+  PlannedDAG,
   DiscoveryLessonTeaser,
   ConceptVoteResponse,
 } from '../types';
@@ -529,6 +530,89 @@ export const apiClient = {
             }
           } catch (e) {
             // Ignore partial JSON
+          }
+        }
+      }
+    }
+  },
+
+  async streamCurriculum(
+    userId: string,
+    targetConceptId: string,
+    initialContext?: string,
+    language: string = 'ru',
+    depthLevel?: string,
+    skipProbing: boolean = true,
+    callbacks?: {
+      onLog?: (message: string) => void;
+      onPlanReady?: (planData: { sessionId: string; dag: PlannedDAG; mermaid?: string }) => void;
+      onLessonStart?: (lessonInfo: { conceptId: string; title: string }) => void;
+      onToken?: (token: string) => void;
+      onStepReady?: (step: DeepStep) => void;
+      onProbing?: (action: any) => void;
+      onError?: (err: any) => void;
+    },
+    sessionId?: string,
+  ): Promise<void> {
+    const res = await fetch(`${API_BASE}/deep/stream-curriculum`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId,
+        target_concept_id: targetConceptId,
+        initial_user_context: initialContext,
+        language: language,
+        depth_level: depthLevel,
+        skip_probing: skipProbing,
+        session_id: sessionId,
+      }),
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error('Failed to start curriculum streaming');
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const raw = line.slice(6).trim();
+          if (!raw) continue;
+          try {
+            const event = JSON.parse(raw);
+            if (event.type === 'log' && callbacks?.onLog) {
+              callbacks.onLog(event.message);
+            } else if (event.type === 'plan_ready' && callbacks?.onPlanReady) {
+              callbacks.onPlanReady({
+                sessionId: event.session_id,
+                dag: event.dag,
+                mermaid: event.mermaid_diagram,
+              });
+            } else if (event.type === 'lesson_start' && callbacks?.onLessonStart) {
+              callbacks.onLessonStart({
+                conceptId: event.concept_id,
+                title: event.title,
+              });
+            } else if (event.type === 'token' && callbacks?.onToken) {
+              callbacks.onToken(event.token);
+            } else if (event.type === 'ready' && callbacks?.onStepReady) {
+              callbacks.onStepReady(event.step);
+            } else if (event.type === 'probing' && callbacks?.onProbing) {
+              callbacks.onProbing(event.action);
+            } else if (event.type === 'error' && callbacks?.onError) {
+              callbacks.onError(new Error(event.error));
+            }
+          } catch (e) {
+            // Partial JSON ignored
           }
         }
       }

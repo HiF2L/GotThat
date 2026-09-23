@@ -1276,15 +1276,6 @@ class StepExecutor:
         await session.commit()
         await session.refresh(new_step)
 
-        # Trigger background prefetch for step N+1
-        asyncio.create_task(
-            self.prefetch_next_step(
-                deep_session_id=deep_session.id,
-                current_concept_index=step_sequence - 1,
-                target_lang=getattr(deep_session, "language", None) or "ru",
-                user_notes=user_notes,
-            )
-        )
 
         payload = self._build_step_payload_from_db(new_step, concept, deep_session, step_sequence)
         yield {"type": "ready", "step": payload.model_dump()}

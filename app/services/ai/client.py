@@ -495,15 +495,19 @@ class AIClientManager:
         status = "success"
         error_msg = None
 
+        total_chars = 0
         try:
             async for chunk in response_stream:
                 choices = getattr(chunk, "choices", [])
                 if choices and choices[0].delta:
                     delta_content = getattr(choices[0].delta, "content", None)
                     if delta_content:
+                        total_chars += len(delta_content)
                         yield delta_content
                     elif hasattr(choices[0].delta, "reasoning_content") and getattr(choices[0].delta, "reasoning_content", None):
-                        yield str(choices[0].delta.reasoning_content)
+                        r_text = str(choices[0].delta.reasoning_content)
+                        total_chars += len(r_text)
+                        yield r_text
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
@@ -519,6 +523,11 @@ class AIClientManager:
             raise
         finally:
             latency_ms = int((time.time() - start_time) * 1000)
+            if not completion_tokens and total_chars > 0:
+                completion_tokens = max(1, total_chars // 4)
+            if not prompt_tokens:
+                prompt_tokens = max(1, sum(len(m.get("content", "")) for m in messages) // 4)
+
             await cost_tracker.record_usage(
                 task_type=task_type,
                 model=chosen_model,

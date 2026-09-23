@@ -64,7 +64,9 @@ export const App: React.FC = () => {
   const [deepTargetConceptId, setDeepTargetConceptId] = useState<string | undefined>(
     initialRoute.conceptId || localStorage.getItem('got_it_deep_concept_id') || undefined
   );
-  const [deepSkipProbing, setDeepSkipProbing] = useState<boolean>(false);
+  const [deepSkipProbing, setDeepSkipProbing] = useState<boolean>(() => {
+    return localStorage.getItem('got_it_deep_skip_probing') === 'true';
+  });
   const [activeTrackId, setActiveTrackId] = useState<string | null>(initialRoute.trackId || null);
   const [activeConceptId, setActiveConceptId] = useState<string | null>(initialRoute.conceptId || null);
 
@@ -208,6 +210,7 @@ export const App: React.FC = () => {
 
   const handleSelectConceptForDeep = (conceptId: string, trackId?: string, skipProbing: boolean = false) => {
     setDeepSkipProbing(skipProbing);
+    localStorage.setItem('got_it_deep_skip_probing', String(skipProbing));
     navigate('deep', trackId || activeTrackId, conceptId, false);
   };
 

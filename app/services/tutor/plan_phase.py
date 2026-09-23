@@ -1,6 +1,7 @@
 import logging
 import uuid
-from typing import Dict, Any, List, Optional
+import time
+from typing import Dict, Any, List, Optional, Callable, Awaitable
 from sqlalchemy import select, and_, or_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.ontology import Concept, ConceptDependency, Track, DependencyType
@@ -8,7 +9,7 @@ from app.models.session import DeepLearningSession
 from app.models.mastery import UserMasteryState, User
 from app.services.graph.knowledge_graph import knowledge_graph_service
 from app.services.ai.fact_checker import fact_checker
-from app.services.ai.client import ai_clients
+from app.services.ai.client import ai_clients, _safe_json_loads, extract_json_or_fallback
 from app.schemas.tutor import PlannedDAGSchema
 from app.config import settings
 
@@ -68,6 +69,7 @@ class PlanPhaseManager:
         probing_transcript: Optional[Dict[str, Any]] = None,
         language: str = "ru",
         depth_level: str = "high",
+        on_progress: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> PlannedDAGSchema:
         # Fetch target concept & track context
         concept_res = await session.execute(select(Concept).where(Concept.id == target_concept_id))
@@ -148,14 +150,58 @@ class PlanPhaseManager:
                 except Exception as e:
                     logger.warning(f"Could not query User.preferred_model in plan_phase: {e}")
 
-            plan_data = await ai_clients.generate_json(
+            # Stream plan generation from LLM to eliminate timeouts and send live activity logs
+            chunks: List[str] = []
+            concept_count = 0
+            last_log_time = time.time()
+            if on_progress:
+                try:
+                    await on_progress(f"Запуск архитектора курса на модели {active_plan_model}...")
+                except Exception:
+                    pass
+
+            async for chunk in ai_clients.generate_chat_stream(
                 messages=messages,
                 model=active_plan_model,
                 temperature=0.25,
                 max_tokens=14000,
-                timeout_seconds=120.0,
                 task_type="plan_generation",
-            )
+            ):
+                chunks.append(chunk)
+                if '"title"' in chunk:
+                    concept_count += 1
+                now = time.time()
+                if on_progress and (now - last_log_time >= 2.5 or '"title"' in chunk):
+                    last_log_time = now
+                    msg = (
+                        f"Проектирую структуру курса: сформировано тем ~{max(1, concept_count)}..."
+                        if is_russian
+                        else f"Designing curriculum: ~{max(1, concept_count)} concepts formed..."
+                    )
+                    try:
+                        await on_progress(msg)
+                    except Exception:
+                        pass
+
+            full_plan_text = "".join(chunks).strip()
+            plan_data = _safe_json_loads(full_plan_text)
+            if not isinstance(plan_data, dict) or not plan_data.get("concepts"):
+                plan_data = extract_json_or_fallback(full_plan_text)
+
+            if not isinstance(plan_data, dict) or not plan_data.get("concepts"):
+                logger.warning(f"Plan generation from '{active_plan_model}' did not produce valid concepts. Falling back to plan model...")
+                if on_progress:
+                    try:
+                        await on_progress("Уточнение схемы курса через резервную модель...")
+                    except Exception:
+                        pass
+                plan_data = await ai_clients.generate_json(
+                    messages=messages,
+                    model=getattr(settings, "PLAN_MODEL", "openai/gpt-4.1-mini"),
+                    temperature=0.25,
+                    max_tokens=14000,
+                    task_type="plan_generation_fallback",
+                )
 
             raw_concepts = plan_data.get("concepts", [])
             raw_deps = plan_data.get("dependencies", [])

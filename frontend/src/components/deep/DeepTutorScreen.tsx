@@ -26,6 +26,7 @@ import {
   Network,
   X,
   Layers,
+  Terminal,
 } from 'lucide-react';
 
 interface DeepTutorScreenProps {
@@ -72,6 +73,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   const [loadingProgress, setLoadingProgress] = useState<number>(15);
   const [loadingTimeLeft, setLoadingTimeLeft] = useState<number>(8);
   const [streamingContent, setStreamingContent] = useState<string>('');
+  const [planningLogs, setPlanningLogs] = useState<string[]>([]);
 
   useEffect(() => {
     if (!loading) {
@@ -104,12 +106,12 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
       if (!isAlreadyActive && !isStartingSessionRef.current) {
         loadedTargetRef.current = targetConceptId;
-        startSession(targetConceptId);
+        startSession(targetConceptId, skipProbing);
       }
     } else if (!sessionId && !isStartingSessionRef.current) {
-      startSession(targetConceptId);
+      startSession(targetConceptId, skipProbing);
     }
-  }, [targetConceptId, isActive]);
+  }, [targetConceptId, isActive, skipProbing]);
 
   // Initialize Deep Learning Session
   const startSession = async (conceptId?: string, overrideSkipProbing?: boolean) => {
@@ -120,7 +122,8 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setCurrentStep(null); // CRITICAL: Reset step so old lesson never renders below probing test!
     setDagPlan(null);
     setLoading(true);
-    setLoadingMessage('Загрузка материалов курса из базы знаний...');
+    setStreamingContent('');
+    setPlanningLogs([]);
 
     try {
       const target = conceptId || targetConceptId || '';
@@ -128,14 +131,75 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       if (target) {
         localStorage.setItem('got_it_deep_concept_id', target);
       }
-      const effectiveSkipProbing = overrideSkipProbing !== undefined ? overrideSkipProbing : Boolean(skipProbing);
+      const effectiveSkipProbing =
+        overrideSkipProbing !== undefined
+          ? overrideSkipProbing
+          : Boolean(skipProbing || localStorage.getItem('got_it_deep_skip_probing') === 'true');
+
+      if (effectiveSkipProbing) {
+        setLoadingMessage('Инициализация курса и проектирование учебного плана...');
+        await apiClient.streamCurriculum(
+          userId,
+          target,
+          yapNote || 'Starting study session.',
+          language,
+          undefined,
+          true,
+          {
+            onLog: (msg) => {
+              setLoadingMessage(msg);
+              setPlanningLogs((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+            },
+            onPlanReady: (p) => {
+              setSessionId(p.sessionId);
+              setDagPlan(p.dag);
+              setCurrentPhase('teaching');
+            },
+            onLessonStart: (l) => {
+              setLoadingMessage(`Синтез урока: ${l.title}...`);
+              setStreamingContent('');
+            },
+            onToken: (tok) => {
+              setStreamingContent((prev) => prev + tok);
+            },
+            onStepReady: (step) => {
+              setCurrentStep(step);
+              loadedTargetRef.current = step.concept_id;
+              if (onActiveConceptChange) {
+                onActiveConceptChange(step.concept_id, step.track_slug || step.track_id);
+              }
+              setLoading(false);
+              setStreamingContent('');
+            },
+            onProbing: (action) => {
+              handleTutorActionResponse(action);
+            },
+            onError: (err) => {
+              console.warn('streamCurriculum error, fallback to startDeepSession:', err);
+              apiClient
+                .startDeepSession(userId, target, yapNote, language, undefined, true)
+                .then((res) => {
+                  setSessionId(res.session_id);
+                  handleTutorActionResponse(res.initial_action, res.session_id);
+                })
+                .catch(() => {
+                  setLoading(false);
+                  alert('Could not start deep session. Ensure backend is running.');
+                });
+            },
+          }
+        );
+        return;
+      }
+
+      setLoadingMessage('Загрузка материалов курса из базы знаний...');
       const res = await apiClient.startDeepSession(
         userId,
         target,
         yapNote || 'Starting study session.',
         language,
         undefined,
-        effectiveSkipProbing,
+        false,
       );
       setSessionId(res.session_id);
       handleTutorActionResponse(res.initial_action, res.session_id);
@@ -217,6 +281,64 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     }
   };
 
+  const streamSessionPlan = async (sid: string) => {
+    const target = targetConceptId || loadedTargetRef.current || '';
+    setLoading(true);
+    setStreamingContent('');
+    setPlanningLogs([]);
+    setLoadingMessage('Инициализация курса и проектирование учебного плана...');
+
+    try {
+      await apiClient.streamCurriculum(
+        userId,
+        target,
+        yapNote || 'Starting study session.',
+        language,
+        undefined,
+        true,
+        {
+          onLog: (msg) => {
+            setLoadingMessage(msg);
+            setPlanningLogs((prev) => (prev.includes(msg) ? prev : [...prev, msg]));
+          },
+          onPlanReady: (p) => {
+            setSessionId(p.sessionId);
+            setDagPlan(p.dag);
+            setCurrentPhase('teaching');
+          },
+          onLessonStart: (l) => {
+            setLoadingMessage(`Синтез урока: ${l.title}...`);
+            setStreamingContent('');
+          },
+          onToken: (tok) => {
+            setStreamingContent((prev) => prev + tok);
+          },
+          onStepReady: (step) => {
+            setCurrentStep(step);
+            loadedTargetRef.current = step.concept_id;
+            if (onActiveConceptChange) {
+              onActiveConceptChange(step.concept_id, step.track_slug || step.track_id);
+            }
+            setLoading(false);
+            setStreamingContent('');
+          },
+          onProbing: (action) => {
+            handleTutorActionResponse(action, sid);
+          },
+          onError: (err) => {
+            console.error('streamSessionPlan error:', err);
+            setLoading(false);
+            alert('Не удалось составить план курса. Пожалуйста, попробуйте еще раз.');
+          },
+        },
+        sid,
+      );
+    } catch (streamErr) {
+      console.error('streamSessionPlan failed:', streamErr);
+      setLoading(false);
+    }
+  };
+
   const handleTutorActionResponse = (actionData: any, activeSessionId?: string) => {
     if (!actionData) return;
     const phase = actionData.phase;
@@ -227,6 +349,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       setCurrentStep(null); // Explicitly ensure currentStep is null during probing
       setProbeQuestion(actionData.probe_question);
       setLoading(false);
+    } else if (phase === 'plan_needed') {
+      if (currentSid) {
+        streamSessionPlan(currentSid);
+      }
     } else if (phase === 'plan_ready') {
       setDagPlan(actionData.dag);
       setLoadingMessage('Запуск первого урока...');
@@ -307,6 +433,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
   const handleAnswerProbe = async (chosenOptionId: string) => {
     if (!sessionId) return;
+    if (chosenOptionId === 'generate_plan_now') {
+      streamSessionPlan(sessionId);
+      return;
+    }
     setSelectedProbeOptionId(chosenOptionId);
     setLoading(true);
     setLoadingMessage('Profiling cognitive boundaries & factoring reasoning...');
@@ -621,6 +751,43 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               />
             </div>
           </div>
+
+          {/* Planning logs console */}
+          {planningLogs.length > 0 && (
+            <div className="p-3.5 bg-surface-950/80 rounded-2xl border border-slate-800/80 space-y-2 text-xs font-mono">
+              <div className="flex items-center gap-2 text-slate-400 font-bold uppercase tracking-wider text-[10px]">
+                <Terminal className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Процесс проектирования курса</span>
+              </div>
+              <div className="space-y-1 max-h-36 overflow-y-auto pr-1">
+                {planningLogs.map((log, idx) => (
+                  <div key={idx} className="flex items-start gap-2 text-slate-300 text-[11px] animate-fadeIn">
+                    <span className="text-emerald-400 shrink-0 font-bold">✓</span>
+                    <span className="leading-tight">{log}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* DAG Map Ready Badge during lesson streaming */}
+          {dagPlan && dagPlan.nodes && dagPlan.nodes.length > 0 && (
+            <div className="p-3 bg-surface-950/60 rounded-2xl border border-indigo-500/20 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs text-indigo-300">
+                <Network className="w-4 h-4 text-indigo-400" />
+                <span>Граф курса сформирован: <strong className="text-white">{dagPlan.nodes.length}</strong> уроков</span>
+              </div>
+              {dagPlan.mermaid_code && (
+                <button
+                  type="button"
+                  onClick={() => setIsGraphModalOpen(true)}
+                  className="px-2.5 py-1 text-xs font-medium text-indigo-300 hover:text-white bg-indigo-600/20 hover:bg-indigo-600/40 rounded-lg border border-indigo-500/30 transition-all cursor-pointer"
+                >
+                  Схема DAG
+                </button>
+              )}
+            </div>
+          )}
 
           {streamingContent && (
             <div className="mt-4 pt-4 border-t border-slate-800 space-y-3 animate-fadeIn">
