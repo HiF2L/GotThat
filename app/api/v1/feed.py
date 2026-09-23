@@ -83,6 +83,7 @@ async def submit_quiz_answer(
 
 
 @router.post("/voice-attempt", response_model=QuizAnswerResult)
+@router.post("/voice-reasoning", response_model=QuizAnswerResult)
 async def submit_voice_reasoning_answer(
     user_id: str = Form(...),
     card_id: str = Form(...),

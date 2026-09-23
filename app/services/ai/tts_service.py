@@ -3,11 +3,15 @@ import asyncio
 import hashlib
 import re
 from typing import Dict, Any, Optional, List
+from pathlib import Path
 from collections import OrderedDict
 from app.config import settings
 from app.services.ai.client import ai_clients, extract_json_or_fallback
 
 logger = logging.getLogger(__name__)
+
+TTS_CACHE_DIR = Path("data/tts_cache")
+TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # LaTeX symbol phonetization map for natural speech
 LATEX_PHONETIC_REPLACEMENTS = [
@@ -198,10 +202,11 @@ class TTSService:
     - In-memory LRU audio caching for 0ms replay latency.
     """
 
-    def __init__(self, max_cache_size: int = 100):
+    def __init__(self, max_cache_size: int = 200):
         self._cache: OrderedDict[str, bytes] = OrderedDict()
         self._max_cache_size = max_cache_size
         self._lock = asyncio.Lock()
+        self._in_flight: Dict[str, asyncio.Future] = {}
 
     def resolve_voice(self, voice: Optional[str]) -> str:
         if not voice or not voice.strip():
@@ -268,7 +273,7 @@ class TTSService:
     ) -> bytes:
         """
         Synthesizes speech from markdown text using high-quality Neural Voices.
-        Returns binary MP3 audio bytes.
+        Returns binary MP3 audio bytes with two-tier (memory + persistent disk) caching.
         """
         clean_text = clean_markdown_for_speech(text)
         if not clean_text:
@@ -276,73 +281,135 @@ class TTSService:
 
         effective_voice = self.resolve_voice(voice)
         effective_speed = max(0.5, min(2.0, speed))
-
         cache_key = self._get_cache_key(clean_text, effective_voice, effective_speed)
 
+        # 1. Check in-memory LRU cache
         async with self._lock:
             if cache_key in self._cache:
                 self._cache.move_to_end(cache_key)
                 return self._cache[cache_key]
 
-        chunks = self.chunk_text(clean_text, max_chars=3500)
-        audio_segments: List[bytes] = []
+        # 2. Check persistent disk cache (instant 0ms response, 0 API cost)
+        disk_path = TTS_CACHE_DIR / f"{cache_key}.mp3"
+        if disk_path.exists():
+            try:
+                disk_bytes = disk_path.read_bytes()
+                if disk_bytes and len(disk_bytes) > 100:
+                    async with self._lock:
+                        if len(self._cache) >= self._max_cache_size:
+                            self._cache.popitem(last=False)
+                        self._cache[cache_key] = disk_bytes
+                    return disk_bytes
+            except Exception as e:
+                logger.warning(f"Error reading TTS disk cache for {cache_key}: {e}")
 
-        for chunk in chunks:
-            chunk_success = False
-            last_err = None
+        # 3. In-flight request deduplication: if identical audio is being synthesized right now, wait for it
+        async with self._lock:
+            fut = self._in_flight.get(cache_key)
+            if fut is None:
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                self._in_flight[cache_key] = fut
+                is_leader = True
+            else:
+                is_leader = False
 
-            # 1. Primary: High-Quality Zero-Cost Neural Voices via Edge-TTS (<10MB RAM)
-            if HAS_EDGE_TTS:
-                try:
-                    audio_bytes = await self._synthesize_edge_tts(chunk, effective_voice, effective_speed)
-                    if audio_bytes and len(audio_bytes) > 100:
-                        audio_segments.append(audio_bytes)
-                        chunk_success = True
-                except Exception as e:
-                    last_err = e
-                    logger.warning(f"Edge-TTS synthesis error: {e}. Falling back to ProxyAPI...")
+        if not is_leader:
+            return await fut
 
-            # 2. Fallback: Only if cloud/paid TTS is explicitly configured (never when TTS_ENGINE is 'edge' or 'local')
-            if not chunk_success and getattr(settings, "TTS_ENGINE", "edge") in ("cloud", "openai", "proxyapi"):
-                openai_voice = "alloy"
-                for o_name in ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]:
-                    if o_name in (voice or "").lower():
-                        openai_voice = o_name
-                        break
+        try:
+            chunks = self.chunk_text(clean_text, max_chars=3500)
+            audio_segments: List[bytes] = []
 
-                for model_name in [settings.TTS_MODEL, "tts-1"]:
+            for chunk in chunks:
+                chunk_success = False
+                last_err = None
+
+                # 3a. Primary: High-Quality Zero-Cost Neural Voices via Edge-TTS (<10MB RAM)
+                if HAS_EDGE_TTS:
                     try:
-                        response = await ai_clients.tts_client.audio.speech.create(
-                            model=model_name,
-                            voice=openai_voice,
-                            input=chunk,
-                            response_format="mp3",
-                            speed=effective_speed,
-                        )
-                        audio_bytes = response.content if hasattr(response, "content") else await response.aread()
+                        audio_bytes = await self._synthesize_edge_tts(chunk, effective_voice, effective_speed)
                         if audio_bytes and len(audio_bytes) > 100:
                             audio_segments.append(audio_bytes)
                             chunk_success = True
-                            break
                     except Exception as e:
                         last_err = e
-                        logger.warning(f"Fallback ProxyAPI TTS failed: {e}")
-                        continue
+                        logger.warning(f"Edge-TTS synthesis error: {e}. Falling back to ProxyAPI...")
 
-            if not chunk_success:
-                logger.error(f"All TTS synthesis engines failed for chunk: {last_err}")
-                raise RuntimeError(f"Failed to synthesize speech audio: {last_err}")
+                # 3b. Fallback: Cloud/ProxyAPI TTS
+                if not chunk_success and getattr(settings, "TTS_ENGINE", "edge") in ("cloud", "openai", "proxyapi"):
+                    openai_voice = "alloy"
+                    for o_name in ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]:
+                        if o_name in (voice or "").lower():
+                            openai_voice = o_name
+                            break
 
-        # Combine all audio chunks
-        full_audio = b"".join(audio_segments)
+                    for model_name in [settings.TTS_MODEL, "tts-1"]:
+                        try:
+                            response = await ai_clients.tts_client.audio.speech.create(
+                                model=model_name,
+                                voice=openai_voice,
+                                input=chunk,
+                                response_format="mp3",
+                                speed=effective_speed,
+                            )
+                            audio_bytes = response.content if hasattr(response, "content") else await response.aread()
+                            if audio_bytes and len(audio_bytes) > 100:
+                                audio_segments.append(audio_bytes)
+                                chunk_success = True
+                                break
+                        except Exception as e:
+                            last_err = e
+                            logger.warning(f"Fallback ProxyAPI TTS failed: {e}")
+                            continue
 
-        # Store in LRU cache
-        async with self._lock:
-            if len(self._cache) >= self._max_cache_size:
-                self._cache.popitem(last=False)
-            self._cache[cache_key] = full_audio
+                if not chunk_success:
+                    logger.error(f"All TTS synthesis engines failed for chunk: {last_err}")
+                    raise RuntimeError(f"Failed to synthesize speech audio: {last_err}")
 
-        return full_audio
+            full_audio = b"".join(audio_segments)
+
+            # Persist to disk cache
+            try:
+                temp_disk_path = TTS_CACHE_DIR / f"{cache_key}.tmp"
+                temp_disk_path.write_bytes(full_audio)
+                temp_disk_path.replace(disk_path)
+            except Exception as e:
+                logger.warning(f"Failed to persist TTS to disk cache: {e}")
+
+            # Store in memory LRU cache
+            async with self._lock:
+                if len(self._cache) >= self._max_cache_size:
+                    self._cache.popitem(last=False)
+                self._cache[cache_key] = full_audio
+
+            # Resolve in-flight future for concurrent waiters
+            if not fut.done():
+                fut.set_result(full_audio)
+
+            return full_audio
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            async with self._lock:
+                self._in_flight.pop(cache_key, None)
+
+    async def prefetch_audio(
+        self,
+        text: str,
+        voice: Optional[str] = None,
+        speed: float = 1.0,
+    ) -> None:
+        """
+        Asynchronously ensures audio for given text is generated and cached on disk.
+        Completely non-blocking, swallows exceptions gracefully.
+        """
+        try:
+            await self.synthesize_speech(text, voice, speed)
+        except Exception as e:
+            logger.debug(f"Audio prefetch notice: {e}")
 
 
 tts_service = TTSService()

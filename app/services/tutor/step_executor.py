@@ -167,93 +167,171 @@ class StepExecutor:
         user_notes: str = "",
     ):
         """
-        Non-blocking trigger to pre-generate the next lesson in background.
+        Non-blocking trigger to pre-generate the next lessons in background.
+        Delegates to the rolling 2-lesson ahead text & audio pipeline.
+        """
+        self.trigger_background_prefetch_pipeline(
+            user_id=user_id,
+            session_id=session_id,
+            current_concept_id=concept_id,
+            current_sequence=step_sequence,
+        )
+
+    def trigger_background_prefetch_pipeline(
+        self,
+        user_id: str,
+        session_id: str,
+        current_concept_id: str,
+        current_sequence: int,
+    ):
+        """
+        Non-blocking trigger to pre-generate the next 2 lessons (both text and TTS audio).
         """
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(
-                self.prefetch_next_step(
+                self.prefetch_pipeline(
                     user_id=user_id,
                     session_id=session_id,
-                    concept_id=concept_id,
-                    step_sequence=step_sequence,
-                    user_notes=user_notes,
+                    current_concept_id=current_concept_id,
+                    current_sequence=current_sequence,
                 )
             )
         except Exception as e:
-            logger.warning(f"Could not schedule background prefetch: {e}")
+            logger.warning(f"Could not schedule rolling prefetch pipeline: {e}")
 
-    async def prefetch_next_step(
+    async def prefetch_pipeline(
         self,
         user_id: str,
         session_id: str,
-        concept_id: str,
-        step_sequence: int,
-        user_notes: str = "",
+        current_concept_id: str,
+        current_sequence: int,
     ):
         """
-        Background speculative pre-generation of the next lesson in the DAG.
-        Runs in background without blocking the user, caching the generated step in SQLite.
-        When the student clicks 'Next Lesson', it loads instantly with 0ms latency.
+        Rolling 2-Lesson Ahead Pipeline:
+        Proactively pre-generates full text AND TTS audio for the next 2 subsequent lessons (N+1 and N+2).
+        Runs in detached background tasks so closing the tab or reloading never aborts generation.
         """
         from app.core.database import async_session_maker
-        task_key = f"{session_id}:{concept_id}"
+        from app.services.ai.tts_service import tts_service
 
+        task_key = f"pipeline:{session_id}:{current_concept_id}"
         async with self._task_lock:
             if task_key in self._in_flight_tasks and not self._in_flight_tasks[task_key].done():
-                return  # Already generating in background
+                return
 
-        async def _background_worker():
+        async def _pipeline_worker():
             try:
-                async with async_session_maker() as db_session:
-                    # Check if already cached in DB
-                    step_check = await db_session.execute(
-                        select(DeepSessionStep.id).where(
-                            and_(
-                                DeepSessionStep.session_id == session_id,
-                                DeepSessionStep.concept_id == concept_id,
-                            )
-                        )
-                    )
-                    if step_check.scalars().first():
-                        return
-
-                    sess_res = await db_session.execute(
+                async with async_session_maker() as db:
+                    s_res = await db.execute(
                         select(DeepLearningSession).where(DeepLearningSession.id == session_id)
                     )
-                    deep_sess = sess_res.scalars().first()
-                    if not deep_sess:
+                    deep_sess = s_res.scalars().first()
+                    if not deep_sess or not deep_sess.planned_dag:
                         return
 
-                    c_res = await db_session.execute(
-                        select(Concept).where(Concept.id == concept_id)
-                    )
-                    concept = c_res.scalars().first()
-                    if not concept:
+                    nodes = deep_sess.planned_dag.get("nodes", [])
+                    if not nodes:
                         return
 
-                    logger.info(f"Speculatively pre-generating next lesson '{concept.title}' (step {step_sequence}) in background...")
-                    step_payload = await self._do_execute_atomic_step(
-                        session=db_session,
-                        deep_session=deep_sess,
-                        concept=concept,
-                        step_sequence=step_sequence,
-                        user_notes=user_notes,
-                    )
-                    logger.info(f"Pre-generation complete for '{concept.title}'. Cached for instant navigation.")
+                    # Find current node index
+                    curr_idx = -1
+                    for idx, n in enumerate(nodes):
+                        if n.get("id") == current_concept_id or n.get("concept_id") == current_concept_id:
+                            curr_idx = idx
+                            break
+                    if curr_idx == -1:
+                        curr_idx = max(0, current_sequence - 1)
+
+                    # Next 2 upcoming nodes
+                    upcoming = nodes[curr_idx + 1 : curr_idx + 3]
+                    for offset, target_node in enumerate(upcoming):
+                        target_cid = target_node.get("id") or target_node.get("concept_id")
+                        target_seq = curr_idx + 1 + offset + 1
+                        if not target_cid:
+                            continue
+
+                        st = None
+                        step_res = await db.execute(
+                            select(DeepSessionStep)
+                            .where(
+                                and_(
+                                    DeepSessionStep.session_id == session_id,
+                                    DeepSessionStep.concept_id == target_cid,
+                                    DeepSessionStep.explanation_markdown.isnot(None),
+                                )
+                            )
+                            .order_by(DeepSessionStep.created_at.desc())
+                        )
+                        for s in step_res.scalars().all():
+                            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                                st = s
+                                break
+
+                        # Check global cache if not in session
+                        if not st:
+                            gst_res = await db.execute(
+                                select(DeepSessionStep)
+                                .where(
+                                    and_(
+                                        DeepSessionStep.concept_id == target_cid,
+                                        DeepSessionStep.explanation_markdown.isnot(None),
+                                    )
+                                )
+                                .order_by(DeepSessionStep.created_at.desc())
+                            )
+                            for s in gst_res.scalars().all():
+                                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                                    st = DeepSessionStep(
+                                        session_id=session_id,
+                                        concept_id=target_cid,
+                                        step_sequence=target_seq,
+                                        step_type=s.step_type or "explanation",
+                                        explanation_markdown=s.explanation_markdown,
+                                        visual_type=s.visual_type,
+                                        visual_payload=s.visual_payload,
+                                        visual_alt=s.visual_alt,
+                                        verification_challenge=s.verification_challenge,
+                                        verification_passed=False,
+                                    )
+                                    db.add(st)
+                                    await db.commit()
+                                    await db.refresh(st)
+                                    break
+
+                        if not st or not st.explanation_markdown or len(st.explanation_markdown.strip()) <= 50:
+                            # Generate text in background
+                            c_res = await db.execute(select(Concept).where(Concept.id == target_cid))
+                            target_c = c_res.scalars().first()
+                            if target_c:
+                                logger.info(f"[Pipeline] Proactively pre-generating text for '{target_c.title}' (step {target_seq})...")
+                                p = await self.execute_atomic_step(
+                                    session=db,
+                                    deep_session=deep_sess,
+                                    concept=target_c,
+                                    step_sequence=target_seq,
+                                )
+                                if p and p.explanation_markdown:
+                                    logger.info(f"[Pipeline] Text ready for '{target_c.title}'. Pre-generating TTS audio...")
+                                    await tts_service.prefetch_audio(p.explanation_markdown)
+                        else:
+                            # Step text already exists in DB! Ensure TTS audio is synthesized and cached on disk!
+                            logger.info(f"[Pipeline] Step text already cached for node {target_cid}. Pre-generating TTS audio...")
+                            await tts_service.prefetch_audio(st.explanation_markdown)
+
             except Exception as e:
-                logger.warning(f"Background prefetching for concept {concept_id} skipped or failed: {e}")
+                logger.warning(f"Error in prefetch_pipeline: {e}")
             finally:
                 async with self._task_lock:
                     self._in_flight_tasks.pop(task_key, None)
 
         try:
             loop = asyncio.get_running_loop()
-            bg_task = loop.create_task(_background_worker())
+            t = loop.create_task(_pipeline_worker())
             async with self._task_lock:
-                self._in_flight_tasks[task_key] = bg_task
+                self._in_flight_tasks[task_key] = t
         except Exception as e:
-            logger.warning(f"Failed to start prefetch worker: {e}")
+            logger.warning(f"Could not launch pipeline worker: {e}")
 
     async def execute_atomic_step(
         self,
@@ -266,25 +344,38 @@ class StepExecutor:
     ) -> DeepStepPayload:
         # 0. Check if this exact step was ALREADY generated and persisted in SQLite
         if not force_regenerate:
+            existing_step = None
             existing_step_res = await session.execute(
                 select(DeepSessionStep)
                 .where(
                     and_(
                         DeepSessionStep.session_id == deep_session.id,
                         DeepSessionStep.concept_id == concept.id,
+                        DeepSessionStep.explanation_markdown.isnot(None),
                     )
                 )
-                .order_by(DeepSessionStep.step_sequence.desc())
+                .order_by(DeepSessionStep.created_at.desc())
             )
-            existing_step = existing_step_res.scalars().first()
+            for s in existing_step_res.scalars().all():
+                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                    existing_step = s
+                    break
 
             if not existing_step:
                 global_step_res = await session.execute(
                     select(DeepSessionStep)
-                    .where(DeepSessionStep.concept_id == concept.id)
+                    .where(
+                        and_(
+                            DeepSessionStep.concept_id == concept.id,
+                            DeepSessionStep.explanation_markdown.isnot(None),
+                        )
+                    )
                     .order_by(DeepSessionStep.created_at.desc())
                 )
-                existing_step = global_step_res.scalars().first()
+                for s in global_step_res.scalars().all():
+                    if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                        existing_step = s
+                        break
 
             if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
                 logger.info(f"Restoring cached Step {step_sequence} for '{concept.title}' from DB with 0ms latency.")
@@ -296,13 +387,24 @@ class StepExecutor:
                         step_sequence=step_sequence,
                         step_type=existing_step.step_type or "explanation",
                         explanation_markdown=existing_step.explanation_markdown,
-                        visual_artifact=existing_step.visual_artifact,
+                        visual_type=existing_step.visual_type,
+                        visual_payload=existing_step.visual_payload,
+                        visual_alt=existing_step.visual_alt,
                         verification_challenge=existing_step.verification_challenge,
                     )
                     session.add(cloned_step)
                     await session.commit()
                     existing_step = cloned_step
-                return self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+                payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+                from app.services.ai.tts_service import tts_service
+                asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
+                self.trigger_background_prefetch_pipeline(
+                    user_id=deep_session.user_id,
+                    session_id=deep_session.id,
+                    current_concept_id=concept.id,
+                    current_sequence=step_sequence,
+                )
+                return payload
 
         # 1. Check if an in-flight generation task is already running for this exact session & concept
         task_key = f"{deep_session.id}:{concept.id}"
@@ -373,19 +475,59 @@ class StepExecutor:
         user_notes: str = "",
     ) -> DeepStepPayload:
         # 0. Check cache once more under direct session
+        existing_step = None
         existing_step_res = await session.execute(
             select(DeepSessionStep)
             .where(
                 and_(
                     DeepSessionStep.session_id == deep_session.id,
                     DeepSessionStep.concept_id == concept.id,
+                    DeepSessionStep.explanation_markdown.isnot(None),
                 )
             )
-            .order_by(DeepSessionStep.step_sequence.desc())
+            .order_by(DeepSessionStep.created_at.desc())
         )
-        existing_step = existing_step_res.scalars().first()
+        for s in existing_step_res.scalars().all():
+            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                existing_step = s
+                break
+
+        if not existing_step:
+            global_step_res = await session.execute(
+                select(DeepSessionStep)
+                .where(
+                    and_(
+                        DeepSessionStep.concept_id == concept.id,
+                        DeepSessionStep.explanation_markdown.isnot(None),
+                    )
+                )
+                .order_by(DeepSessionStep.created_at.desc())
+            )
+            for s in global_step_res.scalars().all():
+                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                    cloned = DeepSessionStep(
+                        session_id=deep_session.id,
+                        concept_id=concept.id,
+                        step_sequence=step_sequence,
+                        step_type=s.step_type or "explanation",
+                        explanation_markdown=s.explanation_markdown,
+                        visual_type=s.visual_type,
+                        visual_payload=s.visual_payload,
+                        visual_alt=s.visual_alt,
+                        verification_challenge=s.verification_challenge,
+                        verification_passed=False,
+                    )
+                    session.add(cloned)
+                    await session.commit()
+                    await session.refresh(cloned)
+                    existing_step = cloned
+                    break
+
         if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
-            return self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+            payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+            from app.services.ai.tts_service import tts_service
+            asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
+            return payload
 
         # 1. Gather rich course progression context
         track_title = "Курс"
@@ -876,6 +1018,9 @@ class StepExecutor:
         session.add(db_step)
         await session.commit()
 
+        from app.services.ai.tts_service import tts_service
+        asyncio.create_task(tts_service.prefetch_audio(explanation))
+
         from app.core.slug import generate_slug
         c_slug = concept.slug or generate_slug(concept.title)
 
@@ -1081,19 +1226,65 @@ class StepExecutor:
         Captures final usage metrics into AICostTracker.
         """
         # 1. Immediate SQLite Cache Check
+        existing_step = None
         existing_step_res = await session.execute(
             select(DeepSessionStep)
             .where(
                 and_(
                     DeepSessionStep.session_id == deep_session.id,
                     DeepSessionStep.concept_id == concept.id,
+                    DeepSessionStep.explanation_markdown.isnot(None),
                 )
             )
-            .order_by(DeepSessionStep.step_sequence.desc())
+            .order_by(DeepSessionStep.created_at.desc())
         )
-        existing_step = existing_step_res.scalars().first()
+        for s in existing_step_res.scalars().all():
+            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                existing_step = s
+                break
+
+        # 1b. Global Concept Cache Check across all sessions
+        if not existing_step:
+            global_step_res = await session.execute(
+                select(DeepSessionStep)
+                .where(
+                    and_(
+                        DeepSessionStep.concept_id == concept.id,
+                        DeepSessionStep.explanation_markdown.isnot(None),
+                    )
+                )
+                .order_by(DeepSessionStep.created_at.desc())
+            )
+            for s in global_step_res.scalars().all():
+                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                    cloned = DeepSessionStep(
+                        session_id=deep_session.id,
+                        concept_id=concept.id,
+                        step_sequence=step_sequence,
+                        step_type=s.step_type or "explanation",
+                        explanation_markdown=s.explanation_markdown,
+                        visual_type=s.visual_type,
+                        visual_payload=s.visual_payload,
+                        visual_alt=s.visual_alt,
+                        verification_challenge=s.verification_challenge,
+                        verification_passed=False,
+                    )
+                    session.add(cloned)
+                    await session.commit()
+                    await session.refresh(cloned)
+                    existing_step = cloned
+                    break
+
         if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
             payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
+            from app.services.ai.tts_service import tts_service
+            asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
+            self.trigger_background_prefetch_pipeline(
+                user_id=deep_session.user_id,
+                session_id=deep_session.id,
+                current_concept_id=concept.id,
+                current_sequence=step_sequence,
+            )
             yield {"type": "ready", "step": payload.model_dump()}
             return
 
@@ -1278,6 +1469,14 @@ class StepExecutor:
 
 
         payload = self._build_step_payload_from_db(new_step, concept, deep_session, step_sequence)
+        from app.services.ai.tts_service import tts_service
+        asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
+        self.trigger_background_prefetch_pipeline(
+            user_id=deep_session.user_id,
+            session_id=deep_session.id,
+            current_concept_id=concept.id,
+            current_sequence=step_sequence,
+        )
         yield {"type": "ready", "step": payload.model_dump()}
 
 

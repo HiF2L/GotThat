@@ -22,10 +22,197 @@ from app.config import settings
 from app.services.ai.client import ai_clients
 from app.services.ai.cost_tracker import cost_tracker
 from app.services.moderation import moderation_service
-from sqlalchemy import select, and_, delete
+from sqlalchemy import select, and_, delete, or_
 
 logger = logging.getLogger("got_it.deep_tutor")
 router = APIRouter(prefix="/deep", tags=["Deep Tutor Mode"])
+
+
+@router.get("/active-session")
+async def get_active_session(
+    user_id: str = Query(...),
+    target_concept_id: Optional[str] = Query(None),
+    session_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Returns the user's ongoing DeepLearningSession to instantly restore state on reload.
+    """
+    if session_id:
+        s_res = await db.execute(
+            select(DeepLearningSession).where(
+                and_(
+                    DeepLearningSession.id == session_id,
+                    DeepLearningSession.user_id == user_id,
+                )
+            )
+        )
+        sess = s_res.scalars().first()
+        if sess:
+            return {
+                "session_id": sess.id,
+                "status": sess.status,
+                "current_concept_index": sess.current_concept_index,
+                "current_concept_id": sess.current_concept_id,
+                "planned_dag": sess.planned_dag,
+                "mermaid_diagram": sess.mermaid_diagram,
+                "language": sess.language,
+                "depth_level": sess.depth_level,
+            }
+
+    query = select(DeepLearningSession).where(DeepLearningSession.user_id == user_id)
+    if target_concept_id:
+        c_res = await db.execute(select(Concept).where(Concept.id == target_concept_id))
+        target_concept = c_res.scalars().first()
+        if target_concept and target_concept.track_id:
+            track_concepts_res = await db.execute(select(Concept.id).where(Concept.track_id == target_concept.track_id))
+            track_cids = [c for c in track_concepts_res.scalars().all()]
+            query = query.where(
+                or_(
+                    DeepLearningSession.target_concept_id == target_concept_id,
+                    DeepLearningSession.target_concept_id.in_(track_cids),
+                )
+            )
+        else:
+            query = query.where(DeepLearningSession.target_concept_id == target_concept_id)
+
+    query = query.order_by(DeepLearningSession.created_at.desc())
+    s_res = await db.execute(query)
+    sess = s_res.scalars().first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="No active session found")
+
+    return {
+        "session_id": sess.id,
+        "status": sess.status,
+        "current_concept_index": sess.current_concept_index,
+        "current_concept_id": sess.current_concept_id,
+        "planned_dag": sess.planned_dag,
+        "mermaid_diagram": sess.mermaid_diagram,
+        "language": sess.language,
+        "depth_level": sess.depth_level,
+    }
+
+
+@router.get("/step/{concept_id}", response_model=DeepStepPayload)
+async def get_cached_step(
+    concept_id: str,
+    session_id: Optional[str] = Query(None),
+    step_sequence: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Direct REST retrieval of an existing lesson step.
+    Checks SQLite (both current session and global cache).
+    Returns DeepStepPayload in < 10ms with 0 LLM calls, or 404 if step needs generation.
+    """
+    c_res = await db.execute(
+        select(Concept).where(or_(Concept.id == concept_id, Concept.slug == concept_id))
+    )
+    concept = c_res.scalars().first()
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept not found")
+
+    existing_step = None
+    deep_session = None
+    if session_id:
+        s_res = await db.execute(select(DeepLearningSession).where(DeepLearningSession.id == session_id))
+        deep_session = s_res.scalars().first()
+        step_res = await db.execute(
+            select(DeepSessionStep)
+            .where(
+                and_(
+                    DeepSessionStep.session_id == session_id,
+                    DeepSessionStep.concept_id == concept.id,
+                    DeepSessionStep.explanation_markdown.isnot(None),
+                )
+            )
+            .order_by(DeepSessionStep.created_at.desc())
+        )
+        for s in step_res.scalars().all():
+            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                existing_step = s
+                break
+
+    if not existing_step:
+        global_step_res = await db.execute(
+            select(DeepSessionStep)
+            .where(
+                and_(
+                    DeepSessionStep.concept_id == concept.id,
+                    DeepSessionStep.explanation_markdown.isnot(None),
+                )
+            )
+            .order_by(DeepSessionStep.created_at.desc())
+        )
+        for s in global_step_res.scalars().all():
+            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                if deep_session:
+                    seq = step_sequence or (deep_session.current_concept_index + 1)
+                    cloned = DeepSessionStep(
+                        session_id=deep_session.id,
+                        concept_id=concept.id,
+                        step_sequence=seq,
+                        step_type=s.step_type or "explanation",
+                        explanation_markdown=s.explanation_markdown,
+                        visual_type=s.visual_type,
+                        visual_payload=s.visual_payload,
+                        visual_alt=s.visual_alt,
+                        verification_challenge=s.verification_challenge,
+                        verification_passed=False,
+                    )
+                    db.add(cloned)
+                    await db.commit()
+                    await db.refresh(cloned)
+                    existing_step = cloned
+                else:
+                    existing_step = s
+                break
+
+    if not existing_step or not existing_step.explanation_markdown or len(existing_step.explanation_markdown.strip()) <= 50:
+        raise HTTPException(status_code=404, detail="Step not yet synthesized")
+
+    if not deep_session:
+        class _MockSession:
+            id = existing_step.session_id
+            user_id = "default"
+        deep_session = _MockSession()
+
+    effective_seq = step_sequence or existing_step.step_sequence or 1
+    payload = step_executor._build_step_payload_from_db(existing_step, concept, deep_session, effective_seq)
+
+    from app.services.ai.tts_service import tts_service
+    asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
+
+    return payload
+
+
+class PrefetchPipelineRequest(BaseModel):
+    session_id: str
+    current_concept_id: str
+    step_sequence: Optional[int] = 1
+
+
+@router.post("/prefetch-pipeline")
+async def trigger_prefetch_pipeline_endpoint(
+    request: PrefetchPipelineRequest,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Triggers the rolling 2-lesson ahead text and TTS audio pipeline.
+    """
+    s_res = await db.execute(select(DeepLearningSession).where(DeepLearningSession.id == request.session_id))
+    deep_sess = s_res.scalars().first()
+    if not deep_sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    step_executor.trigger_background_prefetch_pipeline(
+        user_id=deep_sess.user_id,
+        session_id=deep_sess.id,
+        current_concept_id=request.current_concept_id,
+        current_sequence=request.step_sequence or 1,
+    )
+    return {"status": "pipeline_started", "session_id": request.session_id}
 
 
 @router.post("/start")
@@ -595,12 +782,13 @@ async def stream_curriculum(
                 # Plan is ready!
                 yield f"data: {json.dumps({'type': 'plan_ready', 'session_id': session.id, 'dag': dag_data, 'mermaid_diagram': mermaid}, ensure_ascii=False)}\n\n"
 
-                # Immediately begin streaming Lesson 1
+                # Immediately begin streaming the active lesson in sequence
                 nodes = (dag_data or {}).get("nodes", [])
                 if nodes:
-                    first_node = nodes[0]
-                    first_cid = first_node.get("id") or first_node.get("concept_id")
-                    c_res = await db.execute(select(Concept).where(Concept.id == first_cid))
+                    curr_idx = min(getattr(session, "current_concept_index", 0) or 0, max(0, len(nodes) - 1))
+                    target_node = nodes[curr_idx]
+                    target_cid = target_node.get("id") or target_node.get("concept_id")
+                    c_res = await db.execute(select(Concept).where(Concept.id == target_cid))
                     active_concept = c_res.scalars().first()
 
                     if active_concept:
@@ -609,7 +797,7 @@ async def stream_curriculum(
                             session=db,
                             deep_session=session,
                             concept=active_concept,
-                            step_sequence=1,
+                            step_sequence=curr_idx + 1,
                             user_notes=request.initial_user_context or "",
                         ):
                             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

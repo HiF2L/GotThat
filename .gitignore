@@ -1,4 +1,4 @@
-﻿# Environment variables and secrets
+# Environment variables and secrets
 .env
 .env.*
 !.env.example
@@ -11,6 +11,8 @@ got_it.db
 db_inspect_out.txt
 scratch_step.txt
 scratch/
+data/
+*.mp3
 
 # Python & Pytest
 __pycache__/

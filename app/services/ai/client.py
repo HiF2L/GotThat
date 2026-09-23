@@ -103,15 +103,123 @@ def extract_json_or_fallback(content: str) -> Dict[str, Any]:
     return {"raw_text": cleaned}
 
 
+REASONING_TAGS = ("think", "thought", "reasoning", "antthinking")
+
+
+def strip_reasoning_tags(text: str) -> str:
+    """
+    Strips internal model reasoning/thinking tokens (<think>...</think>, <thought>...</thought>, etc.)
+    from the final text across lines.
+    """
+    if not text:
+        return ""
+    pattern = r"<(" + "|".join(REASONING_TAGS) + r")(?:\s+[^>]*)?>.*?</\1>"
+    cleaned = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Also strip cut-off or leading reasoning tag blocks if closing tag was truncated
+    cleaned = re.sub(r"^<(" + "|".join(REASONING_TAGS) + r")(?:\s+[^>]*)?>.*?(?=\n#{1,4}\s|\Z)", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
+
+class ReasoningStreamFilter:
+    """
+    Streaming state machine that buffers and eliminates reasoning/thinking blocks on the fly
+    (<think>...</think>, <thought>...</thought>, <reasoning>...</reasoning>).
+    Properly handles tag boundaries split across token chunks without swallowing pedagogical text.
+    """
+
+    def __init__(self, tag_names=REASONING_TAGS):
+        self.tag_names = tuple(t.lower() for t in tag_names)
+        self.in_reasoning = False
+        self.current_tag: Optional[str] = None
+        self.buffer = ""
+
+    def process_chunk(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+
+        self.buffer += chunk
+        output: List[str] = []
+
+        while self.buffer:
+            if not self.in_reasoning:
+                open_pos = self.buffer.find("<")
+                if open_pos == -1:
+                    output.append(self.buffer)
+                    self.buffer = ""
+                    break
+                else:
+                    if open_pos > 0:
+                        output.append(self.buffer[:open_pos])
+                        self.buffer = self.buffer[open_pos:]
+
+                    close_angle = self.buffer.find(">")
+                    if close_angle == -1:
+                        if len(self.buffer) > 30:
+                            output.append(self.buffer[0])
+                            self.buffer = self.buffer[1:]
+                        else:
+                            break
+                    else:
+                        tag_content = self.buffer[1:close_angle].strip().lower()
+                        matched_tag = None
+                        for t in self.tag_names:
+                            if tag_content == t or tag_content.startswith(f"{t} "):
+                                matched_tag = t
+                                break
+
+                        if matched_tag:
+                            self.in_reasoning = True
+                            self.current_tag = matched_tag
+                            self.buffer = self.buffer[close_angle + 1:]
+                        else:
+                            output.append(self.buffer[:close_angle + 1])
+                            self.buffer = self.buffer[close_angle + 1:]
+            else:
+                close_marker = f"</{self.current_tag}>"
+                close_pos = self.buffer.lower().find(close_marker)
+                if close_pos != -1:
+                    self.buffer = self.buffer[close_pos + len(close_marker):]
+                    self.in_reasoning = False
+                    self.current_tag = None
+                else:
+                    lower_buf = self.buffer.lower()
+                    partial = False
+                    for i in range(1, len(close_marker)):
+                        if lower_buf.endswith(close_marker[:i]):
+                            partial = True
+                            break
+                    if partial:
+                        for i in range(1, len(close_marker)):
+                            if lower_buf.endswith(close_marker[:i]):
+                                self.buffer = self.buffer[-i:]
+                                break
+                    else:
+                        self.buffer = ""
+                    break
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        if not self.in_reasoning and self.buffer:
+            res = self.buffer
+            self.buffer = ""
+            return res
+        self.buffer = ""
+        return ""
+
+
 def sanitize_markdown_text(text: str) -> str:
     """
     Guarantees that a markdown text payload is never inadvertently a raw JSON string
-    or escaped JSON dump. Extracts 'explanation_markdown' or 'explanation' if wrapped in JSON.
+    or escaped JSON dump, and cleanly strips all internal model thinking tags.
     """
     if not text:
         return ""
 
     cleaned = text.strip()
+    # 0. Strip reasoning / chain of thought blocks first
+    cleaned = strip_reasoning_tags(cleaned)
+
     if (cleaned.startswith("{") or cleaned.startswith("```json") or cleaned.startswith("```")) and (
         '"explanation_markdown"' in cleaned or '"explanation"' in cleaned
     ):
@@ -130,6 +238,9 @@ def sanitize_markdown_text(text: str) -> str:
 
     if "\\n" in cleaned and "\n" not in cleaned:
         cleaned = cleaned.replace("\\n", "\n")
+
+    # Clean once more in case stripped json had reasoning tags inside
+    cleaned = strip_reasoning_tags(cleaned)
 
     return cleaned
 
@@ -333,6 +444,9 @@ class AIClientManager:
             if not content and hasattr(msg, "reasoning_content") and getattr(msg, "reasoning_content", None):
                 content = str(msg.reasoning_content).strip()
 
+            # Clean all internal model thinking/reasoning tags from pedagogical text
+            content = strip_reasoning_tags(content)
+
             if not content:
                 raise ValueError(f"Model '{chosen_model}' returned empty content")
 
@@ -496,6 +610,7 @@ class AIClientManager:
         error_msg = None
 
         total_chars = 0
+        stream_filter = ReasoningStreamFilter()
         try:
             async for chunk in response_stream:
                 choices = getattr(chunk, "choices", [])
@@ -503,11 +618,13 @@ class AIClientManager:
                     delta_content = getattr(choices[0].delta, "content", None)
                     if delta_content:
                         total_chars += len(delta_content)
-                        yield delta_content
+                        filtered_text = stream_filter.process_chunk(delta_content)
+                        if filtered_text:
+                            yield filtered_text
                     elif hasattr(choices[0].delta, "reasoning_content") and getattr(choices[0].delta, "reasoning_content", None):
+                        # Account for reasoning token volume in metrics, but do NOT yield internal model thoughts as lesson text
                         r_text = str(choices[0].delta.reasoning_content)
-                        total_chars += len(r_text)
-                        yield r_text
+                        reasoning_tokens += max(1, len(r_text) // 4)
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
@@ -515,6 +632,10 @@ class AIClientManager:
                     completion_tokens = _safe_int(getattr(u, "completion_tokens", 0) or 0)
                     if hasattr(u, "completion_tokens_details") and getattr(u, "completion_tokens_details", None):
                         reasoning_tokens = _safe_int(getattr(u.completion_tokens_details, "reasoning_tokens", 0) or 0)
+
+            remaining = stream_filter.flush()
+            if remaining:
+                yield remaining
 
         except Exception as e:
             status = "error"

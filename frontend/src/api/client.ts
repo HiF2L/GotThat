@@ -149,6 +149,55 @@ export const apiClient = {
     return res.json();
   },
 
+  async getActiveSession(
+    userId: string,
+    targetConceptId?: string,
+    sessionId?: string,
+  ): Promise<any> {
+    const params = new URLSearchParams({ user_id: userId });
+    if (targetConceptId) params.append('target_concept_id', targetConceptId);
+    if (sessionId) params.append('session_id', sessionId);
+    const res = await fetch(`${API_BASE}/deep/active-session?${params.toString()}`);
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getLessonStep(
+    conceptId: string,
+    sessionId?: string,
+    stepSequence?: number,
+  ): Promise<DeepStep | null> {
+    const params = new URLSearchParams();
+    if (sessionId) params.append('session_id', sessionId);
+    if (stepSequence) params.append('step_sequence', String(stepSequence));
+    const query = params.toString() ? `?${params.toString()}` : '';
+    const res = await fetch(`${API_BASE}/deep/step/${encodeURIComponent(conceptId)}${query}`);
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async prefetchPipeline(
+    sessionId: string,
+    currentConceptId: string,
+    stepSequence?: number,
+  ): Promise<any> {
+    try {
+      const res = await fetch(`${API_BASE}/deep/prefetch-pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          current_concept_id: currentConceptId,
+          step_sequence: stepSequence || 1,
+        }),
+      });
+      if (res.ok) return await res.json();
+    } catch (e) {
+      console.debug('Prefetch pipeline trigger error:', e);
+    }
+    return null;
+  },
+
   async getNextTutorAction(sessionId: string, userNotes: string = ''): Promise<any> {
     const query = userNotes ? `?user_notes=${encodeURIComponent(userNotes)}` : '';
     const res = await fetch(`${API_BASE}/deep/action/${sessionId}${query}`);

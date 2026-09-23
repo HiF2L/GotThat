@@ -136,6 +136,36 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
           ? overrideSkipProbing
           : Boolean(skipProbing || localStorage.getItem('got_it_deep_skip_probing') === 'true');
 
+      // 0. Fast-path active session & cached step restoration on reload
+      try {
+        const savedSessionId = localStorage.getItem('got_it_active_session_id') || undefined;
+        const activeSess = await apiClient.getActiveSession(userId, target, savedSessionId);
+        if (activeSess && activeSess.status === 'teaching' && activeSess.planned_dag) {
+          setSessionId(activeSess.session_id);
+          localStorage.setItem('got_it_active_session_id', activeSess.session_id);
+          setDagPlan(activeSess.planned_dag);
+          setCurrentPhase('teaching');
+
+          const targetCid = target || activeSess.current_concept_id;
+          if (targetCid) {
+            const cachedStep = await apiClient.getLessonStep(targetCid, activeSess.session_id);
+            if (cachedStep) {
+              setCurrentStep(cachedStep);
+              loadedTargetRef.current = cachedStep.concept_id;
+              if (onActiveConceptChange) {
+                onActiveConceptChange(cachedStep.concept_id, cachedStep.track_slug || cachedStep.track_id);
+              }
+              setLoading(false);
+              isStartingSessionRef.current = false;
+              apiClient.prefetchPipeline(activeSess.session_id, cachedStep.concept_id, cachedStep.step_sequence);
+              return;
+            }
+          }
+        }
+      } catch (cacheErr) {
+        console.debug('Fast session recovery notice:', cacheErr);
+      }
+
       if (effectiveSkipProbing) {
         setLoadingMessage('Инициализация курса и проектирование учебного плана...');
         await apiClient.streamCurriculum(
@@ -226,10 +256,28 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setStreamingContent('');
     setLoadingMessage('Синтез урока в реальном времени...');
 
-    const currentSid = activeSessionId || sessionId;
+    const currentSid = activeSessionId || sessionId || localStorage.getItem('got_it_active_session_id');
     const currentDag = overrideDag || dagPlan;
 
     try {
+      // 0. Fast-path check: Is this lesson already cached in SQLite?
+      if (currentSid) {
+        const cachedStep = await apiClient.getLessonStep(conceptId, currentSid);
+        if (cachedStep) {
+          setCurrentStep(cachedStep);
+          const activeConceptKey = cachedStep.concept_id;
+          loadedTargetRef.current = activeConceptKey;
+          if (onActiveConceptChange) {
+            onActiveConceptChange(activeConceptKey, cachedStep.track_slug || cachedStep.track_id);
+          }
+          setLoading(false);
+          setStreamingContent('');
+          isNavigatingRef.current = false;
+          apiClient.prefetchPipeline(currentSid, cachedStep.concept_id, cachedStep.step_sequence);
+          return;
+        }
+      }
+
       if (currentSid && currentDag?.nodes?.some((n) => n.id === conceptId || n.slug === conceptId)) {
         try {
           await apiClient.streamLessonStep(
@@ -251,6 +299,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               }
               setLoading(false);
               setStreamingContent('');
+              apiClient.prefetchPipeline(currentSid, step.concept_id, step.step_sequence);
             },
             (err) => {
               console.warn('Streaming step fallback to selectStep:', err);
