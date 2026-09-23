@@ -20,9 +20,9 @@ class Settings(BaseSettings):
     TTS_VOICE: str = "ru-RU-SvetlanaNeural"
 
     # AI Model Names on ProxyAPI
-    DEEP_MODEL: str = "openai/gpt-4.1-mini"
+    DEEP_MODEL: str = "deepseek/deepseek-v4-pro"
     PLAN_MODEL: str = "openai/gpt-4.1-mini"
-    FAST_MODEL: str = "openai/gpt-4.1-mini"
+    FAST_MODEL: str = "deepseek/deepseek-v4.1-flash"
     VISION_MODEL: Optional[str] = "google/gemini-2.5-flash"
 
 

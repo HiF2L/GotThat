@@ -9,26 +9,45 @@ from app.models.usage import AIUsageLog
 
 logger = logging.getLogger("app.services.ai.cost_tracker")
 
-# ProxyAPI Pricing in RUB per 1,000,000 tokens
+# ProxyAPI Pricing in RUB per 1,000,000 tokens (from official research)
 MODEL_RATES_PER_1M: Dict[str, Dict[str, float]] = {
-    # OpenAI
-    "openai/gpt-4.1-mini": {"prompt": 15.0, "completion": 60.0, "reasoning": 60.0},
-    "openai/gpt-4o-mini": {"prompt": 15.0, "completion": 60.0, "reasoning": 60.0},
-    "openai/gpt-4o": {"prompt": 250.0, "completion": 1000.0, "reasoning": 1000.0},
-    "openai/gpt-4.1": {"prompt": 200.0, "completion": 800.0, "reasoning": 800.0},
-    # DeepSeek
+    # 🏆 Топ: Цена / Качество
+    "anthropic/claude-sonnet-5": {"prompt": 600.0, "completion": 3030.0, "reasoning": 3030.0},
+    "openai/gpt-5.6-terra": {"prompt": 400.0, "completion": 2560.0, "reasoning": 2560.0},
+    "deepseek/deepseek-v4-pro": {"prompt": 180.0, "completion": 550.0, "reasoning": 550.0},
+    "x-ai/grok-4.7": {"prompt": 221.05, "completion": 652.63, "reasoning": 652.63},
+    "qwen/qwen3.8-max": {"prompt": 290.0, "completion": 850.0, "reasoning": 850.0},
+    "openai/gpt-4.1": {"prompt": 516.0, "completion": 2062.0, "reasoning": 2062.0},
+    "zhipu/glm-5.3": {"prompt": 189.47, "completion": 600.0, "reasoning": 600.0},
+    "openai/gpt-4.1-mini": {"prompt": 104.0, "completion": 413.0, "reasoning": 413.0},
+
+    # ⚡ Эконом & Сервис
+    "deepseek/deepseek-v4.1-flash": {"prompt": 41.05, "completion": 168.42, "reasoning": 168.42},
     "deepseek/deepseek-chat": {"prompt": 43.0, "completion": 126.0, "reasoning": 126.0},
-    "deepseek/deepseek-v4-pro": {"prompt": 190.0, "completion": 375.0, "reasoning": 375.0},
-    "deepseek/deepseek-reasoner": {"prompt": 190.0, "completion": 375.0, "reasoning": 375.0},
-    # Google
-    "google/gemini-2.5-flash": {"prompt": 25.0, "completion": 100.0, "reasoning": 100.0},
-    "google/gemini-3-flash-preview": {"prompt": 25.0, "completion": 100.0, "reasoning": 100.0},
-    "google/gemini-2.5-pro": {"prompt": 125.0, "completion": 500.0, "reasoning": 500.0},
-    # Moonshot AI
+    "qwen/qwen3.8-flash": {"prompt": 20.0, "completion": 65.0, "reasoning": 65.0},
+    "openai/gpt-5.6-luna": {"prompt": 60.0, "completion": 360.0, "reasoning": 360.0},
+    "google/gemini-3.1-flash-lite": {"prompt": 76.0, "completion": 455.0, "reasoning": 455.0},
+    "google/gemini-2.5-flash": {"prompt": 78.0, "completion": 645.0, "reasoning": 645.0},
+    "zhipu/glm-5.3-flash": {"prompt": 16.84, "completion": 58.95, "reasoning": 58.95},
+
+    # Сервисные узлы конвейера & Structured Output
+    "openai/o4-mini": {"prompt": 284.0, "completion": 1134.0, "reasoning": 1134.0},
+    "schematron-v2-turbo": {"prompt": 4.11, "completion": 21.05, "reasoning": 21.05},
+
+    # Флагманские & Предыдущие поколения (для поддержки совместимости и точного учета)
+    "anthropic/claude-fable-5-1": {"prompt": 1580.0, "completion": 7900.0, "reasoning": 7900.0},
+    "openai/gpt-6-astra": {"prompt": 1580.0, "completion": 7900.0, "reasoning": 7900.0},
+    "anthropic/claude-opus-5": {"prompt": 1516.0, "completion": 7579.0, "reasoning": 7579.0},
+    "openai/gpt-5.5": {"prompt": 1520.0, "completion": 9100.0, "reasoning": 9100.0},
     "moonshotai/kimi-k3": {"prompt": 550.0, "completion": 2700.0, "reasoning": 2700.0},
-    # Anthropic
     "anthropic/claude-sonnet-4-5": {"prompt": 774.0, "completion": 3866.0, "reasoning": 3866.0},
     "anthropic/claude-opus-4-1": {"prompt": 3866.0, "completion": 19327.0, "reasoning": 19327.0},
+    "google/gemini-3-flash-preview": {"prompt": 152.0, "completion": 910.0, "reasoning": 910.0},
+    "google/gemini-2.5-pro": {"prompt": 323.0, "completion": 2577.0, "reasoning": 2577.0},
+    "openai/gpt-4o-mini": {"prompt": 15.0, "completion": 60.0, "reasoning": 60.0},
+    "openai/gpt-4o": {"prompt": 250.0, "completion": 1000.0, "reasoning": 1000.0},
+    "deepseek/deepseek-reasoner": {"prompt": 190.0, "completion": 375.0, "reasoning": 375.0},
+
     # Default fallback
     "default": {"prompt": 20.0, "completion": 80.0, "reasoning": 80.0},
 }

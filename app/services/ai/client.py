@@ -325,57 +325,91 @@ class AIClientManager:
         clean = clean.replace("moonshot-ai/", "moonshotai/")
 
         # 4. Check if already has a valid vendor namespace
-        valid_vendors = ("google/", "openai/", "deepseek/", "anthropic/", "moonshotai/", "qwen/", "x-ai/", "meta/")
+        valid_vendors = ("google/", "openai/", "deepseek/", "anthropic/", "moonshotai/", "qwen/", "x-ai/", "meta/", "zhipu/")
         if any(clean.startswith(v) for v in valid_vendors):
             return clean
 
         # 5. Strip any extraneous leading slash
         clean = clean.lstrip("/")
 
-
-        # 4. Canonical shorthand mappings
+        # 6. Canonical shorthand mappings
         shorthands = {
+            # 🏆 Топ: Цена / Качество
+            "claude-sonnet-5": "anthropic/claude-sonnet-5",
+            "sonnet-5": "anthropic/claude-sonnet-5",
+            "gpt-5.6-terra": "openai/gpt-5.6-terra",
+            "terra": "openai/gpt-5.6-terra",
+            "deepseek-pro": "deepseek/deepseek-v4-pro",
+            "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+            "grok": "x-ai/grok-4.7",
+            "grok-4.7": "x-ai/grok-4.7",
+            "qwen3.8-max": "qwen/qwen3.8-max",
+            "gpt-4.1": "openai/gpt-4.1",
+            "glm-5.3": "zhipu/glm-5.3",
+            "glm": "zhipu/glm-5.3",
+            "gpt": "openai/gpt-4.1-mini",
+            "gpt-mini": "openai/gpt-4.1-mini",
+            "gpt-4.1-mini": "openai/gpt-4.1-mini",
+            "gpt-4o-mini": "openai/gpt-4.1-mini",
+
+            # ⚡ Эконом & Сервис
+            "deepseek-flash": "deepseek/deepseek-v4.1-flash",
+            "deepseek-v4-flash": "deepseek/deepseek-v4.1-flash",
+            "deepseek-v4.1-flash": "deepseek/deepseek-v4.1-flash",
+            "deepseek": "deepseek/deepseek-chat",
+            "deepseek-chat": "deepseek/deepseek-chat",
+            "deepseek-v3": "deepseek/deepseek-chat",
+            "qwen3.8-flash": "qwen/qwen3.8-flash",
+            "gpt-5.6-luna": "openai/gpt-5.6-luna",
+            "luna": "openai/gpt-5.6-luna",
+            "gemini-3.1-flash-lite": "google/gemini-3.1-flash-lite",
+            "gemini-flash": "google/gemini-2.5-flash",
+            "gemini-2.5-flash": "google/gemini-2.5-flash",
+            "gemini-2.5-flash-lite": "google/gemini-2.5-flash-lite",
+            "glm-5.3-flash": "zhipu/glm-5.3-flash",
+
+            # Узлы силлабуса и схем
+            "o4-mini": "openai/o4-mini",
+            "schematron": "schematron-v2-turbo",
+            "schematron-v2-turbo": "schematron-v2-turbo",
+
+            # Legacy & Флагманы
             "kimi": "moonshotai/kimi-k3",
             "kimi-k3": "moonshotai/kimi-k3",
             "k3": "moonshotai/kimi-k3",
             "moonshot": "moonshotai/kimi-k3",
-            "claude": "anthropic/claude-sonnet-4-5",
-            "sonnet": "anthropic/claude-sonnet-4-5",
-            "claude-sonnet": "anthropic/claude-sonnet-4-5",
+            "claude": "anthropic/claude-sonnet-5",
+            "sonnet": "anthropic/claude-sonnet-5",
+            "claude-sonnet": "anthropic/claude-sonnet-5",
             "claude-sonnet-4-5": "anthropic/claude-sonnet-4-5",
-            "claude-sonnet-5": "anthropic/claude-sonnet-5",
+            "claude-fable": "anthropic/claude-fable-5-1",
+            "claude-fable-5-1": "anthropic/claude-fable-5-1",
+            "gpt-6-astra": "openai/gpt-6-astra",
+            "astra": "openai/gpt-6-astra",
+            "claude-opus-5": "anthropic/claude-opus-5",
             "opus": "anthropic/claude-opus-4-1",
             "claude-opus": "anthropic/claude-opus-4-1",
-            "deepseek": "deepseek/deepseek-chat",
-            "deepseek-chat": "deepseek/deepseek-chat",
-            "deepseek-v3": "deepseek/deepseek-chat",
-            "deepseek-pro": "deepseek/deepseek-v4-pro",
-            "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-            "deepseek-flash": "deepseek/deepseek-v4-flash",
-            "deepseek-v4-flash": "deepseek/deepseek-v4-flash",
+            "gpt-5.5": "openai/gpt-5.5",
             "deepseek-r1": "deepseek/deepseek-r1",
-            "gpt": "openai/gpt-4.1-mini",
-            "gpt-mini": "openai/gpt-4.1-mini",
-            "gpt-4.1-mini": "openai/gpt-4.1-mini",
-            "gpt-4.1": "openai/gpt-4.1",
-            "gpt-4o-mini": "openai/gpt-4.1-mini",
             "gemini": "google/gemini-2.5-flash",
-            "gemini-flash": "google/gemini-2.5-flash",
-            "gemini-2.5-flash": "google/gemini-2.5-flash",
-            "gemini-2.5-flash-lite": "google/gemini-2.5-flash-lite",
             "gemini-2.5-pro": "google/gemini-2.5-pro",
             "gemini-3-flash": "google/gemini-3-flash-preview",
             "gemini-3-flash-preview": "google/gemini-3-flash-preview",
             "gemini-3.1-pro-preview": "google/gemini-3.1-pro-preview",
-            "gemini-3.1-flash-lite": "google/gemini-3.1-flash-lite",
-            "qwen": "qwen/qwen3.7-max",
-            "qwen-max": "qwen/qwen3.7-max",
+            "qwen": "qwen/qwen3.8-max",
+            "qwen-max": "qwen/qwen3.8-max",
             "qwen3.7-max": "qwen/qwen3.7-max",
         }
         if clean in shorthands:
             return shorthands[clean]
 
-        # 5. Dynamic vendor prefix inference
+        # 7. Dynamic vendor prefix inference
+        if clean.startswith("glm-"):
+            return f"zhipu/{clean}"
+        if clean.startswith("grok"):
+            return f"x-ai/{clean}"
+        if clean.startswith("schematron"):
+            return "schematron-v2-turbo"
         if clean.startswith("gemini"):
             return f"google/{clean}"
         if clean.startswith("deepseek"):

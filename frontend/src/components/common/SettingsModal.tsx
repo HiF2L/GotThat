@@ -8,6 +8,9 @@ export interface AIModelOption {
   provider: string;
   providerIcon: string;
   price: string;
+  category: 'value' | 'economy';
+  score: string;
+  context: string;
   description?: string;
   badge?: string;
 }
@@ -75,90 +78,184 @@ export const AVAILABLE_TTS_VOICES: TtsVoiceOption[] = [
 ];
 
 export const AVAILABLE_AI_MODELS: AIModelOption[] = [
-  // 🟩 OpenAI
+  // 🏆 КАТЕГОРИЯ: ЦЕНА / КАЧЕСТВО (Упорядочены строго по индексу эффективности от 9.8 вниз)
   {
-    id: 'openai/gpt-4.1-mini',
-    name: 'GPT‑4.1 Mini',
-    provider: 'OpenAI (ProxyAPI)',
+    id: 'anthropic/claude-sonnet-5',
+    name: 'Claude Sonnet 5',
+    provider: 'Anthropic',
+    providerIcon: '🧠',
+    price: '600 ₽ / 3 030 ₽',
+    category: 'value',
+    score: '9.8 / 10',
+    context: '1M',
+    badge: 'Топ №1: Базовая теория',
+    description: 'Лидер общего зачета: безукоризненная дидактика, адаптация темпа под студента и академический слог без клише',
+  },
+  {
+    id: 'openai/gpt-5.6-terra',
+    name: 'GPT‑5.6 Terra',
+    provider: 'OpenAI',
     providerIcon: '🟩',
-    price: '104 ₽ / 413 ₽',
-    description: 'Основная модель уроков: эталонная математическая строгость LaTeX, высокая скорость (136 tok/s) и лучшая цена',
-    badge: 'Рекомендуется',
-  },
-
-  // 🔮 Google Gemini
-  {
-    id: 'google/gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
-    provider: 'Google Gemini',
-    providerIcon: '🔮',
-    price: '78 ₽ / 645 ₽',
-    description: 'Сверхбыстрый инференс (182 tok/s), контекст 1M токенов, живые метафоры и мультимодальность',
-    badge: 'Суперскорость',
-  },
-  {
-    id: 'google/gemini-3-flash-preview',
-    name: 'Gemini 3 Flash Preview',
-    provider: 'Google Gemini',
-    providerIcon: '🔮',
-    price: '152 ₽ / 910 ₽',
-    description: 'Интеллектуальный синтез курсов, построение адаптивных DAG-маршрутов на 25-35 уроков',
-  },
-  {
-    id: 'google/gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro',
-    provider: 'Google Gemini',
-    providerIcon: '🔮',
-    price: '323 ₽ / 2 577 ₽',
-    description: 'Глубокое мультимодальное рассуждение и академический синтез сложных тем',
-  },
-
-  // ⚡ DeepSeek
-  {
-    id: 'deepseek/deepseek-chat',
-    name: 'DeepSeek V3 (Chat)',
-    provider: 'DeepSeek',
-    providerIcon: '⚡',
-    price: '43 ₽ / 126 ₽',
-    description: 'Ультрадоступная модель для точных наук, физики, математических формул и программного кода',
-    badge: 'Экономный выбор',
+    price: '400 ₽ / 2 560 ₽',
+    category: 'value',
+    score: '9.5 / 10',
+    context: '1.05M',
+    badge: 'Структура и практика',
+    description: 'Широкий контекст 1.05M, структурирование сложных модулей курса и генерация практических упражнений',
   },
   {
     id: 'deepseek/deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
     provider: 'DeepSeek',
     providerIcon: '⚡',
-    price: '190 ₽ / 375 ₽',
-    description: 'Выдающаяся аналитическая глубина и отличное понимание сложных алгоритмов',
+    price: '180 ₽ / 550 ₽',
+    category: 'value',
+    score: '9.4 / 10',
+    context: '1.05M',
+    badge: 'Рекомендуется для тестов',
+    description: 'Рекордная экономическая выгода: точные науки, глубокий аналитический вывод, математика и программный код',
+  },
+  {
+    id: 'x-ai/grok-4.7',
+    name: 'Grok 4.7',
+    provider: 'xAI',
+    providerIcon: '🚀',
+    price: '221 ₽ / 653 ₽',
+    category: 'value',
+    score: '9.2 / 10',
+    context: '500K',
+    badge: 'Кейс-методы',
+    description: 'Живая эвристика, интерактивные сценарии обучения, ролевые кейсы и разбор прикладных ситуаций',
+  },
+  {
+    id: 'qwen/qwen3.8-max',
+    name: 'Qwen3.8 Max',
+    provider: 'Qwen',
+    providerIcon: '🌐',
+    price: '290 ₽ / 850 ₽',
+    category: 'value',
+    score: '9.1 / 10',
+    context: '1M',
+    badge: 'Мультиязычный анализ',
+    description: 'Комплексный мультиязычный анализ, межкультурные дисциплины и обработка разнородных источников',
+  },
+  {
+    id: 'openai/gpt-4.1',
+    name: 'GPT‑4.1',
+    provider: 'OpenAI',
+    providerIcon: '🟩',
+    price: '516 ₽ / 2 062 ₽',
+    category: 'value',
+    score: '8.9 / 10',
+    context: '1M',
+    badge: 'Силлабусы и планы',
+    description: 'Развернутые методические описания, проектирование академических траекторий и развернутых лекций',
+  },
+  {
+    id: 'zhipu/glm-5.3',
+    name: 'GLM 5.3',
+    provider: 'Zhipu AI',
+    providerIcon: '🔷',
+    price: '189 ₽ / 600 ₽',
+    category: 'value',
+    score: '8.8 / 10',
+    context: '1.31M',
+    badge: 'Аналитика',
+    description: 'Аналитические дисциплины, структурирование объемных нормативных документов и стандартов',
+  },
+  {
+    id: 'openai/gpt-4.1-mini',
+    name: 'GPT‑4.1 Mini',
+    provider: 'OpenAI',
+    providerIcon: '🟩',
+    price: '104 ₽ / 413 ₽',
+    category: 'value',
+    score: '8.5 / 10',
+    context: '1M',
+    badge: 'LaTeX и JSON',
+    description: 'Сверхбыстрый инференс (136 tok/s), строгая математическая разметка LaTeX и надежный JSON-вывод (9.8/10)',
   },
 
-  // 🧠 Anthropic
+  // ⚡ КАТЕГОРИЯ: ЭКОНОМ & СЕРВИС (Упорядочены по стоимости и полезности)
   {
-    id: 'anthropic/claude-sonnet-4-5',
-    name: 'Claude Sonnet 4.5',
-    provider: 'Anthropic',
-    providerIcon: '🧠',
-    price: '774 ₽ / 3 866 ₽',
-    description: 'Шедевральная проза: максимальная глубина нарратива, философия, история и психология без клише',
-    badge: 'Премиум проза',
+    id: 'deepseek/deepseek-v4.1-flash',
+    name: 'DeepSeek V4.1 Flash',
+    provider: 'DeepSeek',
+    providerIcon: '⚡',
+    price: '41 ₽ / 168 ₽',
+    category: 'economy',
+    score: '8.4 / 10',
+    context: '128K',
+    badge: 'Ультраскорость',
+    description: 'Стилистическая правка, мгновенная нормализация синтаксиса и ультрабюджетный вывод уроков',
   },
   {
-    id: 'anthropic/claude-opus-4-1',
-    name: 'Claude Opus 4.1',
-    provider: 'Anthropic',
-    providerIcon: '🧠',
-    price: '3 866 ₽ / 19 327 ₽',
-    description: 'Флагманский аналитический интеллект для сложнейших междисциплинарных исследований',
+    id: 'deepseek/deepseek-chat',
+    name: 'DeepSeek V3 (Chat)',
+    provider: 'DeepSeek',
+    providerIcon: '⚡',
+    price: '43 ₽ / 126 ₽',
+    category: 'economy',
+    score: '8.3 / 10',
+    context: '64K',
+    description: 'Доступная модель для базовых дисциплин, алгоритмов и практических упражнений',
   },
-
-  // 🌙 Moonshot AI
   {
-    id: 'moonshotai/kimi-k3',
-    name: 'Kimi K3',
-    provider: 'Moonshot AI',
-    providerIcon: '🌙',
-    price: '550 ₽ / 2 700 ₽',
-    description: 'Длинный контекст, строгая логика рассуждений и структурированный вывод',
+    id: 'qwen/qwen3.8-flash',
+    name: 'Qwen3.8 Flash',
+    provider: 'Qwen',
+    providerIcon: '🌐',
+    price: '20 ₽ / 65 ₽',
+    category: 'economy',
+    score: '8.2 / 10',
+    context: '128K',
+    badge: 'Суперэконом',
+    description: 'Минимальная задержка: краткие аннотации, подсказки к задачам, поисковые теги и конспекты',
+  },
+  {
+    id: 'openai/gpt-5.6-luna',
+    name: 'GPT‑5.6 Luna',
+    provider: 'OpenAI',
+    providerIcon: '🟩',
+    price: '60 ₽ / 360 ₽',
+    category: 'economy',
+    score: '8.1 / 10',
+    context: '128K',
+    description: 'Сжатые конспекты, резюме пройденного материала и экспресс-опросы с минимальной задержкой',
+  },
+  {
+    id: 'google/gemini-3.1-flash-lite',
+    name: 'Gemini 3.1 Flash Lite',
+    provider: 'Google Gemini',
+    providerIcon: '🔮',
+    price: '76 ₽ / 455 ₽',
+    category: 'economy',
+    score: '8.0 / 10',
+    context: '1M',
+    description: 'Markdown-разметка, форматирование списков, быстрый инференс и компиляция заметок',
+  },
+  {
+    id: 'google/gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
+    provider: 'Google Gemini',
+    providerIcon: '🔮',
+    price: '78 ₽ / 645 ₽',
+    category: 'economy',
+    score: '7.9 / 10',
+    context: '1M',
+    description: 'Высокая скорость (182 tok/s), контекст 1M токенов, мультимодальность и живые метафоры',
+  },
+  {
+    id: 'zhipu/glm-5.3-flash',
+    name: 'GLM 5.3 Flash',
+    provider: 'Zhipu AI',
+    providerIcon: '🔷',
+    price: '17 ₽ / 59 ₽',
+    category: 'economy',
+    score: '7.8 / 10',
+    context: '1.31M',
+    badge: '1.31M Контекст',
+    description: 'Сверхдешевый первичный скрининг и извлечение тезисов из огромных библиотек первоисточников',
   },
 ];
 
@@ -179,12 +276,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   currentLanguage,
   onLanguageChange,
-  currentModel = 'kimi-k3',
+  currentModel = 'deepseek/deepseek-v4-pro',
   onModelChange,
-  currentTtsVoice = 'alloy',
+  currentTtsVoice = 'ru-RU-SvetlanaNeural',
   onTtsVoiceChange,
 }) => {
   const [activeTab, setActiveTab] = useState<'models' | 'language' | 'voice' | 'costs'>('models');
+  const [modelCategoryFilter, setModelCategoryFilter] = useState<'all' | 'value' | 'economy'>('all');
   const [costsData, setCostsData] = useState<any>(null);
   const [loadingCosts, setLoadingCosts] = useState<boolean>(false);
 
@@ -208,8 +306,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Group models by provider
-  const providers = Array.from(new Set(AVAILABLE_AI_MODELS.map((m) => m.provider)));
+  const filteredModels = AVAILABLE_AI_MODELS.filter((m) => {
+    if (modelCategoryFilter === 'value') return m.category === 'value';
+    if (modelCategoryFilter === 'economy') return m.category === 'economy';
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/80 animate-fadeIn">
@@ -288,90 +389,141 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Scrollable Body */}
         <div className="p-6 overflow-y-auto space-y-6 flex-1">
           {activeTab === 'models' && (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-indigo-400" />
-                    <span>Выбор языковой модели (LLM Engine)</span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Стоимость указана за 1 млн входных / 1 млн выходных токенов
-                  </p>
-                </div>
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-indigo-400" />
+                  <span>Выбор языковой модели (LLM Engine)</span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Модели отсортированы по соотношению цена / качество (индексу эффективности)
+                </p>
               </div>
 
-              {/* Providers & Models List */}
-              <div className="space-y-5">
-                {providers.map((provider) => {
-                  const providerModels = AVAILABLE_AI_MODELS.filter((m) => m.provider === provider);
-                  const icon = providerModels[0]?.providerIcon || '🤖';
+              {/* Category Filter Pills */}
+              <div className="flex items-center gap-1.5 p-1 bg-surface-950 border border-slate-800 rounded-2xl overflow-x-auto">
+                <button
+                  onClick={() => setModelCategoryFilter('all')}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-xl transition-all shrink-0 ${
+                    modelCategoryFilter === 'all'
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Все проверенные ({AVAILABLE_AI_MODELS.length})
+                </button>
+                <button
+                  onClick={() => setModelCategoryFilter('value')}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-xl transition-all shrink-0 flex items-center gap-1.5 ${
+                    modelCategoryFilter === 'value'
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>🏆</span>
+                  <span>Цена / Качество ({AVAILABLE_AI_MODELS.filter((m) => m.category === 'value').length})</span>
+                </button>
+                <button
+                  onClick={() => setModelCategoryFilter('economy')}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-xl transition-all shrink-0 flex items-center gap-1.5 ${
+                    modelCategoryFilter === 'economy'
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>⚡</span>
+                  <span>Эконом & Сервис ({AVAILABLE_AI_MODELS.filter((m) => m.category === 'economy').length})</span>
+                </button>
+              </div>
+
+              {/* Models List in Price/Quality Order */}
+              <div className="space-y-2.5">
+                {filteredModels.map((model) => {
+                  const isSelected = (currentModel || 'deepseek/deepseek-v4-pro').toLowerCase() === model.id.toLowerCase();
 
                   return (
-                    <div key={provider} className="space-y-2.5">
-                      <div className="flex items-center gap-2 px-1 text-xs font-bold text-slate-300">
-                        <span>{icon}</span>
-                        <span>{provider}</span>
+                    <div
+                      key={model.id}
+                      onClick={() => onModelChange && onModelChange(model.id)}
+                      className={`p-3.5 sm:p-4 rounded-2xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        isSelected
+                          ? 'bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-500/40 shadow-lg shadow-indigo-600/20'
+                          : 'bg-surface-950/70 border-slate-800 hover:border-slate-700 hover:bg-surface-950'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="mt-0.5 shrink-0">
+                          <div
+                            className={`w-5 h-5 rounded-full flex items-center justify-center border ${
+                              isSelected
+                                ? 'bg-indigo-600 border-indigo-400 text-white'
+                                : 'border-slate-700 bg-surface-900'
+                            }`}
+                          >
+                            {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                          </div>
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-base shrink-0">{model.providerIcon}</span>
+                            <span className={`text-xs sm:text-sm font-bold ${isSelected ? 'text-white' : 'text-slate-200'}`}>
+                              {model.name}
+                            </span>
+
+                            {/* Efficiency Score Badge */}
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-950 border border-indigo-500/40 text-indigo-300">
+                              ⚡ {model.score}
+                            </span>
+
+                            {/* Context Window Badge */}
+                            <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded-md bg-slate-800/80 border border-slate-700/60 text-slate-300">
+                              {model.context}
+                            </span>
+
+                            {/* Functional Badge */}
+                            {model.badge && (
+                              <span
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                                  model.badge.includes('тест')
+                                    ? 'bg-amber-950/80 border-amber-500/50 text-amber-300'
+                                    : 'bg-emerald-950/80 border-emerald-500/40 text-emerald-300'
+                                }`}
+                              >
+                                {model.badge}
+                              </span>
+                            )}
+                          </div>
+
+                          {model.description && (
+                            <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                              {model.description}
+                            </p>
+                          )}
+
+                          <div className="text-[10px] text-slate-500 mt-1 flex items-center gap-2">
+                            <span>Провайдер: <span className="text-slate-400">{model.provider}</span></span>
+                            <span>•</span>
+                            <span>Категория: <span className="text-slate-400">{model.category === 'value' ? 'Цена / Качество' : 'Эконом & Сервис'}</span></span>
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="space-y-2">
-                        {providerModels.map((model) => {
-                          const isSelected = (currentModel || 'kimi-k3').toLowerCase() === model.id.toLowerCase();
-
-                          return (
-                            <div
-                              key={model.id}
-                              onClick={() => onModelChange && onModelChange(model.id)}
-                              className={`p-3.5 sm:p-4 rounded-2xl border transition-all cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                                isSelected
-                                  ? 'bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-500/40 shadow-lg shadow-indigo-600/20'
-                                  : 'bg-surface-950/70 border-slate-800 hover:border-slate-700 hover:bg-surface-950'
-                              }`}
-                            >
-                              <div className="flex items-start gap-3 flex-1 min-w-0">
-                                <div className="mt-0.5 shrink-0">
-                                  <div className={`w-5 h-5 rounded-full flex items-center justify-center border ${
-                                    isSelected
-                                      ? 'bg-indigo-600 border-indigo-400 text-white'
-                                      : 'border-slate-700 bg-surface-900'
-                                  }`}>
-                                    {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                                  </div>
-                                </div>
-
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span className={`text-xs sm:text-sm font-bold ${isSelected ? 'text-white' : 'text-slate-200'}`}>
-                                      {model.name}
-                                    </span>
-                                    {model.badge && (
-                                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-950 border border-emerald-500/40 text-emerald-300">
-                                        {model.badge}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {model.description && (
-                                    <p className="text-[11px] text-slate-400 mt-0.5">
-                                      {model.description}
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
-
-                              {/* Price Tag */}
-                              <div className="shrink-0 self-end sm:self-auto">
-                                <span className={`text-xs font-mono font-semibold px-2.5 py-1 rounded-xl border flex items-center gap-1 ${
-                                  isSelected
-                                    ? 'bg-indigo-900/80 border-indigo-400/50 text-indigo-200'
-                                    : 'bg-surface-900 border-slate-800 text-slate-300'
-                                }`}>
-                                  <DollarSign className="w-3 h-3 text-emerald-400" />
-                                  <span>{model.price}</span>
-                                </span>
-                              </div>
-                            </div>
-                          );
-                        })}
+                      {/* Price Tag */}
+                      <div className="shrink-0 self-end sm:self-auto text-right">
+                        <span
+                          className={`text-xs font-mono font-semibold px-2.5 py-1 rounded-xl border inline-flex items-center gap-1 ${
+                            isSelected
+                              ? 'bg-indigo-900/80 border-indigo-400/50 text-indigo-200'
+                              : 'bg-surface-900 border-slate-800 text-slate-300'
+                          }`}
+                        >
+                          <DollarSign className="w-3 h-3 text-emerald-400" />
+                          <span>{model.price}</span>
+                        </span>
+                        <span className="text-[9px] text-slate-500 block mt-0.5">
+                          вход / вывод за 1M
+                        </span>
                       </div>
                     </div>
                   );
