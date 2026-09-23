@@ -2,6 +2,7 @@ import logging
 import copy
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime
+from fastapi import HTTPException
 from sqlalchemy import select, and_, or_
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +68,83 @@ class TutorStateMachine:
     4. VERIFICATION & NAVIGATION: Updates DAG live with color-coded nodes, skipping already-mastered concepts, and resuming sessions.
     """
 
+    async def _resolve_node_concept(
+        self,
+        session: AsyncSession,
+        node: Dict[str, Any],
+        deep_session: Optional[DeepLearningSession] = None,
+        track_id: Optional[str] = None,
+    ) -> Optional[Concept]:
+        """
+        Resiliently resolves a Concept model for a DAG node.
+        Tries:
+        1. Direct ID match
+        2. Code match (e.g. 'NUT.1.02') within track
+        3. Slug / Title match within track
+        4. Target concept fallback
+        5. First available concept in the track
+        Auto-updates node['id'] if resolved via fallback to heal the DAG.
+        """
+        if not node:
+            return None
+
+        node_id = node.get("id")
+        if node_id:
+            c_res = await session.execute(select(Concept).where(Concept.id == node_id))
+            c = c_res.scalars().first()
+            if c:
+                return c
+
+        target_concept = None
+        effective_track_id = track_id
+        if deep_session and deep_session.target_concept_id:
+            tc_res = await session.execute(select(Concept).where(Concept.id == deep_session.target_concept_id))
+            target_concept = tc_res.scalars().first()
+            if target_concept and not effective_track_id:
+                effective_track_id = target_concept.track_id
+
+        # Fallback 1: match by code in the track
+        if node.get("code"):
+            query = select(Concept).where(Concept.code == node.get("code"))
+            if effective_track_id:
+                query = query.where(Concept.track_id == effective_track_id)
+            c_res = await session.execute(query)
+            c = c_res.scalars().first()
+            if c:
+                node["id"] = c.id
+                return c
+
+        # Fallback 2: match by slug or title in the track
+        if node.get("slug") or node.get("title"):
+            query = select(Concept).where(
+                or_(
+                    Concept.slug == node.get("slug"),
+                    Concept.title == node.get("title")
+                )
+            )
+            if effective_track_id:
+                query = query.where(Concept.track_id == effective_track_id)
+            c_res = await session.execute(query)
+            c = c_res.scalars().first()
+            if c:
+                node["id"] = c.id
+                return c
+
+        # Fallback 3: Target concept
+        if target_concept:
+            node["id"] = target_concept.id
+            return target_concept
+
+        # Fallback 4: Any concept in track
+        if effective_track_id:
+            any_c = await session.execute(select(Concept).where(Concept.track_id == effective_track_id).limit(1))
+            c = any_c.scalars().first()
+            if c:
+                node["id"] = c.id
+                return c
+
+        return None
+
     async def reconcile_dag_with_mastery(
         self,
         session: AsyncSession,
@@ -95,8 +173,20 @@ class TutorStateMachine:
         )
         concepts_db_map = {c.id: c for c in concepts_res.scalars().all()}
 
+        # Auto-heal any nodes whose ID is missing from DB
+        track_id_hint = None
+        for c in concepts_db_map.values():
+            if c.track_id:
+                track_id_hint = c.track_id
+                break
+
         for n in raw_nodes:
             c = concepts_db_map.get(n.get("id"))
+            if not c:
+                # Try healing via code/title lookup
+                c = await self._resolve_node_concept(session, n, track_id=track_id_hint)
+                if c:
+                    concepts_db_map[c.id] = c
             if c:
                 if not n.get("slug") and c.slug:
                     n["slug"] = c.slug
@@ -337,38 +427,55 @@ class TutorStateMachine:
                 track_depth = track_obj.depth_level
         session_depth = (request.depth_level if request.depth_level else None) or track_depth or "high"
 
-        # 3a. If user already has a planned DAG session, resume it
+        # 3a. If user already has a planned DAG session, check if it's still valid or stale
         if existing_session and existing_session.planned_dag:
-            if request.language:
-                existing_session.language = request.language
-            if request.depth_level:
-                existing_session.depth_level = request.depth_level
-            elif track_depth:
-                existing_session.depth_level = track_depth
-
-            # Reconcile DAG with DB mastery states
-            reconciled_dag, active_idx, active_cid, is_all_completed = await self.reconcile_dag_with_mastery(
-                session=session,
-                user_id=user_id,
-                dag_data=existing_session.planned_dag,
-                requested_concept_id=specific_concept_id if not is_track_level_request else None,
-                current_index=existing_session.current_concept_index if (not is_track_level_request and specific_concept_id is None) else None,
+            nodes = existing_session.planned_dag.get("nodes", [])
+            node_ids = [n["id"] for n in nodes if "id" in n]
+            
+            # Verify how many nodes in the cached DAG exist in the database
+            c_check_res = await session.execute(
+                select(Concept.id).where(Concept.id.in_(node_ids))
             )
-            existing_session.planned_dag = reconciled_dag
-            flag_modified(existing_session, "planned_dag")
-            existing_session.mermaid_diagram = reconciled_dag.get("mermaid_code", "")
-            existing_session.current_concept_index = active_idx
-            existing_session.current_concept_id = active_cid
+            existing_db_ids = set(c_check_res.scalars().all())
 
-            if is_all_completed:
-                existing_session.status = "completed"
-                if not existing_session.completed_at:
-                    existing_session.completed_at = datetime.utcnow()
+            # If the session's DAG has no valid concepts or is completely out of sync with current track
+            if not existing_db_ids or len(existing_db_ids) < max(1, len(node_ids) // 2):
+                logger.warning(
+                    f"Session {existing_session.id} DAG is stale ({len(existing_db_ids)} of {len(node_ids)} nodes exist in DB). "
+                    "Resetting planned_dag to rebuild from current track concepts."
+                )
+                existing_session.planned_dag = None
             else:
-                existing_session.status = "teaching"
+                if request.language:
+                    existing_session.language = request.language
+                if request.depth_level:
+                    existing_session.depth_level = request.depth_level
+                elif track_depth:
+                    existing_session.depth_level = track_depth
 
-            await session.commit()
-            return existing_session
+                # Reconcile DAG with DB mastery states
+                reconciled_dag, active_idx, active_cid, is_all_completed = await self.reconcile_dag_with_mastery(
+                    session=session,
+                    user_id=user_id,
+                    dag_data=existing_session.planned_dag,
+                    requested_concept_id=specific_concept_id if not is_track_level_request else None,
+                    current_index=existing_session.current_concept_index if (not is_track_level_request and specific_concept_id is None) else None,
+                )
+                existing_session.planned_dag = reconciled_dag
+                flag_modified(existing_session, "planned_dag")
+                existing_session.mermaid_diagram = reconciled_dag.get("mermaid_code", "")
+                existing_session.current_concept_index = active_idx
+                existing_session.current_concept_id = active_cid
+
+                if is_all_completed:
+                    existing_session.status = "completed"
+                    if not existing_session.completed_at:
+                        existing_session.completed_at = datetime.utcnow()
+                else:
+                    existing_session.status = "teaching"
+
+                await session.commit()
+                return existing_session
 
         # 3b. Resuming an ongoing diagnostic probing session on page reload (F5) without losing questions/answers
         if existing_session and existing_session.status == "probing" and not getattr(request, "skip_probing", False):
@@ -768,10 +875,7 @@ class TutorStateMachine:
                 step_payload = None
                 if nodes:
                     review_node = nodes[review_idx]
-                    concept_res = await session.execute(
-                        select(Concept).where(Concept.id == review_node["id"])
-                    )
-                    concept = concept_res.scalars().first()
+                    concept = await self._resolve_node_concept(session, review_node, deep_session)
                     if concept:
                         try:
                             step_payload = await step_executor.execute_atomic_step(
@@ -795,13 +899,14 @@ class TutorStateMachine:
                 }
 
             current_node = nodes[active_idx]
-            concept_res = await session.execute(
-                select(Concept).where(Concept.id == current_node["id"])
-            )
-            concept = concept_res.scalars().first()
+            concept = await self._resolve_node_concept(session, current_node, deep_session)
 
             if not concept:
-                raise ValueError("Concept not found in DAG")
+                logger.error(f"Cannot resolve concept for node {current_node} in session {deep_session.id}")
+                raise HTTPException(
+                    status_code=404,
+                    detail="Урок для этого шага не найден в базе данных. Пожалуйста, откройте курс заново.",
+                )
 
             step_payload = await step_executor.execute_atomic_step(
                 session=session,
@@ -853,10 +958,7 @@ class TutorStateMachine:
             step_payload = None
             if nodes:
                 review_node = nodes[review_idx]
-                concept_res = await session.execute(
-                    select(Concept).where(Concept.id == review_node["id"])
-                )
-                concept = concept_res.scalars().first()
+                concept = await self._resolve_node_concept(session, review_node, deep_session)
                 if concept:
                     try:
                         step_payload = await step_executor.execute_atomic_step(

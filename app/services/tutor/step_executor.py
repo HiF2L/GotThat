@@ -41,7 +41,9 @@ class StepExecutor:
         "You are an inspiring, world-class professor and master practitioner across all sciences and disciplines (combining Richard Feynman's vivid intuitive storytelling with uncompromising first-principles domain rigor).\n"
         "Your mission is to make this concept EXHAUSTIVELY INFORMATIVE, intellectually captivating, deeply intuitive, and universally rigorous for ANY subject (Rocket Science, Molecular Biology, Advanced Mathematics, World History, Economics, Computer Science, Quantum Physics, Medicine, Philosophy, etc.).\n\n"
         "UNIVERSAL PEDAGOGICAL & FIRST-PRINCIPLES FRAMEWORK:\n"
-        "1. THE HOOK & SYSTEMIC DILEMMA: Start with the real-world crisis, paradox, physical bottleneck, or historical tension that made this concept necessary. Show why primitive or naive approaches broke down.\n"
+        "1. THE HOOK & SPECIFIC ATOMIC DILEMMA:\n"
+        "   - For Step 1 (the opening lesson): Start with the foundational real-world crisis, paradox, or historical tension that made this discipline necessary. Show why naive approaches broke down.\n"
+        "   - For Step 2 and beyond: STRICTLY FORBIDDEN to repeat the broad historical crisis, author biography, or general subject introduction from Step 1. Instead, hook the student with the SPECIFIC bottleneck, technical puzzle, or conceptual conflict unique to THIS atomic concept (how the prior step's solution falls short and demands this new mechanism).\n"
         "2. THE 'AHA!' INTUITION & MENTAL MODEL (Feynman Technique): Introduce a vivid, physical or relatable mental model before formalisms, making the fundamental mechanism self-evident.\n"
         "3. DEEP FIRST-PRINCIPLES DECONSTRUCTION (ADAPTED POLYMORPHICALLY TO THE DISCIPLINE):\n"
         "   - For Exact & Natural Sciences / Engineering / Physics / Rocketry / Chemistry / Math:\n"
@@ -71,7 +73,11 @@ class StepExecutor:
         "9. CRITICAL LANGUAGE MANDATE: All explanations, annotations, questions, and options MUST strictly be in the SAME LANGUAGE as the Concept Title (if in Russian, natural, expressive, academic Russian; if in English, English).\n"
         "10. CONSTITUTIONAL SAFETY & ACADEMIC INTEGRITY:\n"
         "    - STRICTLY FORBIDDEN: Any actionable instructions for manufacturing weapons, explosives, synthesizing illegal drugs, developing malware/exploits, carrying out fraud, promoting contemporary political propaganda/militarism, or engaging in immoral/unethical behavior.\n"
-        "    - If explaining cybersecurity or dual-use science, focus 100% on DEFENSIVE mitigations, secure design, and formal theory.\n\n"
+        "    - If explaining cybersecurity or dual-use science, focus 100% on DEFENSIVE mitigations, secure design, and formal theory.\n"
+        "11. PROGRESSIVE CURRICULAR CONTINUITY & ANTI-REPETITION MANDATE:\n"
+        "    - The student is progressing step-by-step through a course. They have ALREADY read and mastered all previous lessons!\n"
+        "    - NEVER repeat foundational metaphors or thought experiments (e.g. if an introductory analogy like 'white swans' or 'detective' was used earlier, DO NOT use it again).\n"
+        "    - NEVER re-introduce the overall subject, author, or field from scratch. Jump directly into the distinct, advanced mechanics and nuanced reality of THIS atomic concept.\n\n"
         "Output JSON matching this structure:\n"
         "{\n"
         '  "explanation_markdown": "Exhaustive, storytelling-driven, first-principles tutorial text tailored to the domain with complete mechanics, formulas/sources/code, and real-world depth",\n'
@@ -367,14 +373,52 @@ class StepExecutor:
         if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
             return self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
 
-        # 1. Gather prior session history for context
-        prior_steps_res = await session.execute(
-            select(DeepSessionStep)
-            .where(DeepSessionStep.session_id == deep_session.id)
-            .order_by(DeepSessionStep.step_sequence)
+        # 1. Gather rich course progression context
+        track_title = "Курс"
+        track_wishes = None
+        if concept and concept.track_id:
+            try:
+                t_res = await session.execute(select(Track).where(Track.id == concept.track_id))
+                t_obj = t_res.scalars().first()
+                if t_obj:
+                    if t_obj.title:
+                        track_title = t_obj.title
+                    if t_obj.user_wishes:
+                        track_wishes = t_obj.user_wishes
+            except Exception:
+                pass
+
+        planned_nodes = (deep_session.planned_dag or {}).get("nodes", [])
+        total_steps = len(planned_nodes) or 1
+        prior_steps_overview = []
+        for i, pn in enumerate(planned_nodes[:max(0, step_sequence - 1)]):
+            prior_steps_overview.append(f"• Урок {i+1} [{pn.get('code', '')}]: {pn.get('title', '')}")
+        prior_lessons_str = "\n".join(prior_steps_overview) if prior_steps_overview else "Это самый первый урок курса."
+
+        upcoming_nodes = planned_nodes[step_sequence:step_sequence + 3]
+        upcoming_str = ", ".join([f"[{un.get('code', '')}] {un.get('title', '')}" for un in upcoming_nodes]) if upcoming_nodes else "Завершающие разделы курса."
+
+        student_notes_prompt = ""
+        if user_notes and user_notes.strip():
+            student_notes_prompt = (
+                f"\nSTUDENT'S EXPLICIT REASONING / WISHES FOR THIS STEP:\n"
+                f"\"{user_notes.strip()}\"\n"
+                f"PEDAGOGICAL DIRECTIVE: Proactively weave this student reflection, interest, or specific angle into the explanation and examples where natural and illuminating!\n"
+            )
+
+        wishes_context = f"Student Course Wishes / Pedagogical Preferences: {track_wishes}\n" if track_wishes else ""
+
+        anti_repetition_mandate = (
+            f"PROGRESSIVE COURSE CONTEXT:\n"
+            f"• Course: «{track_title}»\n"
+            f"• Current Position: Lesson Step {step_sequence} of {total_steps}\n"
+            f"• Already Mastered Lessons in this Course:\n{prior_lessons_str}\n"
+            f"• Upcoming Lessons (DO NOT ENCROACH ON THESE):\n{upcoming_str}\n\n"
+            f"CRITICAL ANTI-REPETITION & PROGRESSION MANDATE:\n"
+            f"- The student has ALREADY finished all earlier lessons listed above. DO NOT re-introduce the overall subject, the author's biography, or foundational background that was already covered in Lesson 1.\n"
+            f"- NEVER REUSE earlier analogies, metaphors, or thought experiments (e.g. if 'white swans', generic detectives, or basic definitions were used, DO NOT mention them again!).\n"
+            f"- Jump DIRECTLY and EXCLUSIVELY into the specific, advanced, and unique mechanics of THIS concept: '{concept.title}' ({concept.code}). Every paragraph must provide FRESH, non-redundant insight.\n"
         )
-        prior_steps = prior_steps_res.scalars().all()
-        prior_context = "\n".join([f"Step {s.step_sequence}: {s.explanation_markdown[:150]}..." for s in prior_steps[-2:]])
 
         target_lang = getattr(deep_session, "language", None) or "ru"
         is_russian = (target_lang == "ru") or any('\u0400' <= char <= '\u04FF' for char in (concept.title or ""))
@@ -401,31 +445,19 @@ class StepExecutor:
             except Exception as e:
                 logger.warning(f"Could not query User.preferred_model: {e}")
 
-        # Fetch track wishes if present
-        track_wishes = None
-        if concept and concept.track_id:
-            try:
-                t_res = await session.execute(select(Track.user_wishes).where(Track.id == concept.track_id))
-                track_wishes = t_res.scalars().first()
-            except Exception:
-                pass
-
-        wishes_context = f"Student Course Wishes / Pedagogical Preferences: {track_wishes}\n" if track_wishes else ""
-
-        # 2. Call teaching LLM (Kimi K3 or user's chosen model) with deep pedagogy prompt
+        # 2. Call teaching LLM with deep pedagogy prompt
         messages = [
             {"role": "system", "content": self.SYSTEM_TEACH_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    f"Current Concept to Teach: {concept.title} ({concept.code})\n"
+                    f"{anti_repetition_mandate}\n"
+                    f"CURRENT ATOMIC CONCEPT TO TEACH: {concept.title} ({concept.code})\n"
                     f"Concept Summary: {concept.summary}\n"
-                    f"Step Sequence: {step_sequence}\n"
                     f"{wishes_context}"
+                    f"{student_notes_prompt}"
                     f"Target Language: {'Russian (Русский язык)' if is_russian else 'English'}\n"
-                    f"{lang_mandate}\n"
-                    f"Recent Context:\n{prior_context}\n"
-                    f"Student Voice / Yap Scratchpad Notes: {user_notes or 'None'}\n\n"
+                    f"{lang_mandate}\n\n"
                     "Generate a deep, storytelling-driven, intuitive atomic tutorial and verification challenge."
                 ),
             },
