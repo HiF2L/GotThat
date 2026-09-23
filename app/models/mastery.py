@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import String, Text, Float, Boolean, Integer, DateTime, ForeignKey, JSON
+from sqlalchemy import String, Text, Float, Boolean, Integer, DateTime, ForeignKey, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -105,3 +105,18 @@ class VoiceReasoningLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     attempt: Mapped["AssessmentAttempt"] = relationship("AssessmentAttempt", back_populates="voice_log")
+
+
+class ConceptReaction(Base):
+    __tablename__ = "concept_reactions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    concept_id: Mapped[str] = mapped_column(String(36), ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    vote_type: Mapped[str] = mapped_column(String(16), nullable=False)  # 'upvote' | 'downvote'
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "concept_id", name="uq_user_concept_reaction"),
+    )

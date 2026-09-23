@@ -51,5 +51,40 @@ class QuizAnswerResult(BaseModel):
     posterior_mastery: float
     prior_uncertainty: float
     posterior_uncertainty: float
-    next_review_due: Optional[str] = None
     voice_analysis: Optional[VoiceReasoningAnalysis] = None
+
+
+class DiscoveryLessonTeaser(BaseModel):
+    concept_id: str
+    concept_title: str
+    concept_code: str
+    track_id: str
+    track_title: str
+    track_slug: str
+    teaser_text: str  # Intro / Hook of the lesson
+    bloom_level: Optional[str] = "understand"
+    is_mastered: bool = False
+    total_track_concepts: int = 1
+    mastery_prob: float = 0.0
+    score: int = 0
+    upvotes: int = 0
+    downvotes: int = 0
+    user_vote: Optional[str] = None  # "upvote", "downvote", or None
+    comments_count: int = 0
+    read_time_minutes: int = 3
+
+
+class ConceptVoteRequest(BaseModel):
+    user_id: str
+    concept_id: str
+    vote_type: str = Field(..., description="'upvote', 'downvote', or 'clear'")
+
+
+class ConceptVoteResponse(BaseModel):
+    concept_id: str
+    user_vote: Optional[str] = None  # 'upvote', 'downvote', or None
+    score: int
+    upvotes: int
+    downvotes: int
+
+

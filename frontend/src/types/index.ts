@@ -157,3 +157,33 @@ export interface UserMasteryOverview {
   in_progress_concepts: number;
   concepts: ConceptMasterySummary[];
 }
+
+export interface DiscoveryLessonTeaser {
+  concept_id: string;
+  concept_title: string;
+  concept_code: string;
+  track_id: string;
+  track_title: string;
+  track_slug: string;
+  teaser_text: string;
+  bloom_level?: string;
+  is_mastered: boolean;
+  total_track_concepts: number;
+  mastery_prob?: number;
+  score?: number;
+  upvotes?: number;
+  downvotes?: number;
+  user_vote?: 'upvote' | 'downvote' | null;
+  comments_count?: number;
+  read_time_minutes?: number;
+}
+
+export interface ConceptVoteResponse {
+  concept_id: string;
+  user_vote: 'upvote' | 'downvote' | null;
+  score: number;
+  upvotes: number;
+  downvotes: number;
+}
+
+

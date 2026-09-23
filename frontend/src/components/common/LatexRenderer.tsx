@@ -27,18 +27,20 @@ export const LatexRenderer: React.FC<LatexRendererProps> = React.memo(({ content
 
     let cleanContent = content;
     const trimmed = content.trim();
-    if ((trimmed.startsWith('{') || trimmed.startsWith('```json')) && trimmed.includes('"explanation_markdown"')) {
+    if ((trimmed.startsWith('{') || trimmed.startsWith('```json')) && (trimmed.includes('"explanation_markdown"') || trimmed.includes('"explanation"'))) {
       try {
         const jsonStr = trimmed.startsWith('```json') ? trimmed.split('```json')[1].split('```')[0].trim() : trimmed;
-        const parsed = JSON.parse(jsonStr);
+        const repaired = jsonStr.replace(/\\([^"\\/bfnrtu])/g, '\\\\$1');
+        const parsed = JSON.parse(repaired);
         if (parsed && typeof parsed === 'object') {
           cleanContent = parsed.explanation_markdown || parsed.explanation || cleanContent;
         }
       } catch (e) {
-        const match = trimmed.match(/"explanation_markdown"\s*:\s*"(.*?)(?:"\s*,\s*"[a-zA-Z_]+"|\s*"\}|\s*"\s*$)/s);
-        if (match) {
-          cleanContent = match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
-        }
+        const afterKey = trimmed.replace(/^[\s\S]*?"explanation(?:_markdown)?"\s*:\s*"/, '');
+        const endMatch = afterKey.match(/^(.*?)(?:(?<!\\)"\s*[,}]\s*[\s\S]*|(?<!\\)"\s*$)/s);
+        let rawExtracted = endMatch ? endMatch[1] : afterKey;
+        rawExtracted = rawExtracted.replace(/"\s*,\s*"[a-zA-Z0-9_]+"\s*:[\s\S]*$/, '').replace(/"\s*\}?\s*$/, '');
+        cleanContent = rawExtracted.replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
       }
     }
 
@@ -84,7 +86,7 @@ export const LatexRenderer: React.FC<LatexRendererProps> = React.memo(({ content
       const title = typeof token === 'object' ? token.title : arguments[1];
       const text = typeof token === 'object' ? token.text : arguments[2];
       const caption = text || title || '';
-      return `\n<figure class="my-4 sm:float-right sm:ml-5 sm:mb-4 sm:mt-1 w-full sm:w-80 rounded-2xl overflow-hidden border border-slate-800 bg-surface-950 shadow-xl transition-all duration-300 hover:border-indigo-500/50 group clear-both sm:clear-none">\n  <div class="relative w-full overflow-hidden bg-slate-950 flex items-center justify-center min-h-[140px] max-h-[260px]">\n    <img src="${href}" alt="${caption}" class="w-full h-auto max-h-[260px] object-contain group-hover:scale-[1.03] transition-transform duration-500 ease-out block cursor-zoom-in" loading="lazy" />\n  </div>\n  ${caption ? `<figcaption class="px-3.5 py-2.5 text-[11px] text-slate-400 bg-surface-900/60 border-t border-slate-800/80 text-left font-sans flex items-start gap-2 leading-relaxed"><span class="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span><span class="text-slate-300 font-medium">${caption}</span></figcaption>` : ''}\n</figure>\n`;
+      return `\n<figure class="my-4 sm:float-right sm:ml-5 sm:mb-4 sm:mt-1 w-full sm:w-80 rounded-2xl overflow-hidden border border-slate-800 bg-surface-950 shadow-xl transition-all duration-300 hover:border-indigo-500/50 group clear-both sm:clear-none">\n  <div class="relative w-full overflow-hidden bg-slate-950 flex items-center justify-center min-h-[140px] max-h-[260px]">\n    <img src="${href}" alt="${caption}" class="w-full h-auto max-h-[260px] object-contain group-hover:scale-[1.03] transition-transform duration-500 ease-out block cursor-zoom-in transparent-img-contour" loading="lazy" />\n  </div>\n  ${caption ? `<figcaption class="px-3.5 py-2.5 text-[11px] text-slate-400 bg-surface-900/60 border-t border-slate-800/80 text-left font-sans flex items-start gap-2 leading-relaxed"><span class="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5 shrink-0"></span><span class="text-slate-300 font-medium">${caption}</span></figcaption>` : ''}\n</figure>\n`;
     };
 
     marked.setOptions({

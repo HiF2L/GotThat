@@ -32,8 +32,14 @@ GENERIC_CROSS_DOMAIN_MODIFIERS = {
 NEGATIVE_IMAGE_TERMS = {
     "jar", "specimen", "formalin", "troglodytes", "museum", "preserved", "cadaver",
     "autopsy", "skull", "dissection", "dead", "fossil", "flask", "d.669", "taxidermy",
-    "pathology", "organ in jar", "jar of", "amphibian", "invertebrate"
+    "pathology", "organ in jar", "jar of", "amphibian", "invertebrate",
+    "porn", "nude", "erotic", "nsfw", "gore", "blood", "weapon", "war", "corpse"
 }
+
+UNSAFE_IMAGE_PATTERNS = re.compile(
+    r"(?:porn|nude|naked|sex|erotic|gore|blood|weapon|gun|bomb|suicide|corpse|execution|mutilat|nazi|hitler)",
+    re.IGNORECASE,
+)
 
 GENERIC_BROAD_TERMS = {
     "brain", "human", "science", "computer", "system", "program", "biology", "physics"
@@ -78,6 +84,10 @@ class ImageFinderService:
             query = concept_title
 
         clean_query = query.strip()
+        if UNSAFE_IMAGE_PATTERNS.search(clean_query) or (concept_title and UNSAFE_IMAGE_PATTERNS.search(concept_title)):
+            logger.info(f"Skipping educational image search for unsafe/sensitive query: '{clean_query}'")
+            return None
+
         core_entities = self.extract_core_entities(clean_query, concept_title)
 
         # 1. Check curated high-res tech logos for software tools

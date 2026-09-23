@@ -1,7 +1,7 @@
 import React from 'react';
-import { Flame, Compass, BookOpen } from 'lucide-react';
+import { Sparkles, Flame, BookOpen, Map } from 'lucide-react';
 
-export type TabType = 'feed' | 'deep' | 'tracks';
+export type TabType = 'feed' | 'recall' | 'deep' | 'tracks';
 
 interface NavigationProps {
   activeTab: TabType;
@@ -12,10 +12,12 @@ interface NavigationProps {
 
 export const Navigation: React.FC<NavigationProps> = React.memo(({ activeTab, onTabChange, className = '', isDesktop = false }) => {
   const tabs = [
-    { id: 'feed' as TabType, label: 'Quick Feed', icon: Flame },
+    { id: 'feed' as TabType, label: 'Feed', icon: Sparkles },
+    { id: 'recall' as TabType, label: 'Recall Feed', icon: Flame },
     { id: 'deep' as TabType, label: 'Deep Tutor', icon: BookOpen },
-    { id: 'tracks' as TabType, label: 'Knowledge Map', icon: Compass },
+    { id: 'tracks' as TabType, label: 'Knowledge Map', icon: Map },
   ];
+
 
   if (isDesktop) {
     return (

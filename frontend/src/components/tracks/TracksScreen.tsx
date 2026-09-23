@@ -33,7 +33,7 @@ interface TracksScreenProps {
   userId: string;
   activeTrackId?: string | null;
   activeConceptId?: string | null;
-  onSelectTrackForDeepStudy: (conceptId: string, trackId?: string) => void;
+  onSelectTrackForDeepStudy: (conceptId: string, trackId?: string, skipProbing?: boolean) => void;
   onTrackSelected?: (trackId: string) => void;
 }
 
@@ -93,8 +93,36 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
           if (match) targetTrack = match;
         }
         setSelectedTrackId(targetTrack.track_id);
-        const overview = await apiClient.getTrackMastery(targetTrack.slug || targetTrack.track_id, userId);
-        setMasteryOverview(overview);
+        try {
+          const overview = await apiClient.getTrackMastery(targetTrack.slug || targetTrack.track_id, userId);
+          setMasteryOverview(overview);
+        } catch (err) {
+          console.warn('Failed to load track mastery, using resilient fallback:', err);
+          setMasteryOverview({
+            user_id: userId,
+            track_id: targetTrack.track_id,
+            track_title: targetTrack.title,
+            track_slug: targetTrack.slug,
+            track_description: targetTrack.description,
+            track_user_wishes: targetTrack.user_wishes,
+            track_depth_level: targetTrack.depth_level,
+            total_concepts: targetTrack.total_concepts || targetTrack.concepts?.length || 0,
+            mastered_concepts: 0,
+            in_progress_concepts: 0,
+            concepts: (targetTrack.concepts || []).map((c: any) => ({
+              concept_id: c.id,
+              concept_code: c.code || '',
+              title: c.title,
+              slug: c.slug,
+              mastery_prob: 0,
+              uncertainty: 1.0,
+              retrievability: 1.0,
+              stability: 1.0,
+              is_mastered: false,
+              is_due_for_review: false,
+            })),
+          });
+        }
       } else {
         setSelectedTrackId(null);
         setMasteryOverview(null);
@@ -143,13 +171,45 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
       const overview = await apiClient.getTrackMastery(effectiveSlug, userId);
       setMasteryOverview(overview);
     } catch (err) {
-      console.error(err);
+      console.warn('Failed to load track mastery on select, using fallback:', err);
+      if (targetTrack) {
+        setMasteryOverview({
+          user_id: userId,
+          track_id: targetTrack.track_id,
+          track_title: targetTrack.title,
+          track_slug: targetTrack.slug,
+          track_description: targetTrack.description,
+          track_user_wishes: targetTrack.user_wishes,
+          track_depth_level: targetTrack.depth_level,
+          total_concepts: targetTrack.total_concepts || targetTrack.concepts?.length || 0,
+          mastered_concepts: 0,
+          in_progress_concepts: 0,
+          concepts: (targetTrack.concepts || []).map((c: any) => ({
+            concept_id: c.id,
+            concept_code: c.code || '',
+            title: c.title,
+            slug: c.slug,
+            mastery_prob: 0,
+            uncertainty: 1.0,
+            retrievability: 1.0,
+            stability: 1.0,
+            is_mastered: false,
+            is_due_for_review: false,
+          })),
+        });
+      }
     }
   };
 
-  const handleTrackCreated = async (newTrack: TrackSummary) => {
+  const handleTrackCreated = async (newTrack: TrackSummary, startMode: 'quiz' | 'direct' = 'quiz') => {
     await loadData();
-    handleSelectTrack(newTrack.slug || newTrack.track_id, true);
+    await handleSelectTrack(newTrack.slug || newTrack.track_id, true);
+    // Immediately open Deep Tutor in user's chosen start mode!
+    onSelectTrackForDeepStudy(
+      newTrack.slug || newTrack.track_id,
+      newTrack.track_id,
+      startMode === 'direct',
+    );
   };
 
   const handleTrackExpanded = async (updatedTrack: any) => {
@@ -395,7 +455,9 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
     return pinnedFolderCount + pinnedTrackCount;
   }, [folders, tracks]);
 
-  const selectedTrack = tracks.find((t) => t.track_id === selectedTrackId);
+  const selectedTrack = tracks.find(
+    (t) => t.track_id === selectedTrackId || t.slug === selectedTrackId
+  );
 
   const progressPercent = masteryOverview
     ? Math.round(
@@ -1049,17 +1111,23 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
                   </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    const target = selectedTrack.slug || selectedTrack.track_id;
-                    onSelectTrackForDeepStudy(target, selectedTrack.track_id);
-                  }}
-                  className="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm sm:text-base rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-2.5 transition-all cursor-pointer"
-                >
-                  <Play className="w-5 h-5 fill-white" />
-                  <span>Start Complete Guided Deep Arc</span>
-                  <ArrowRight className="w-5 h-5" />
-                </button>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <button
+                    onClick={() => {
+                      const target = selectedTrack.slug || selectedTrack.track_id;
+                      onSelectTrackForDeepStudy(target, selectedTrack.track_id, false);
+                    }}
+                    className="flex-1 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm sm:text-base rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-2.5 transition-all cursor-pointer"
+                  >
+                    <Play className="w-5 h-5 fill-white" />
+                    <span>
+                      {masteryOverview.mastered_concepts === 0 && masteryOverview.in_progress_concepts === 0
+                        ? 'Начать обучение'
+                        : 'Продолжить обучение'}
+                    </span>
+                    <ArrowRight className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
 
               {/* Concepts List in Track */}

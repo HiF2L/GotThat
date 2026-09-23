@@ -39,7 +39,10 @@ class PlanPhaseManager:
         "4. DIAGNOSTIC GAPS & MISCONCEPTIONS: Integrate solutions to student doubts identified during diagnostics.\n"
         "5. Provide for each concept: code (e.g. 'M1.01'), title, summary (concise pedagogical preview), and bloom_level.\n"
         "6. Define all prerequisite dependency pairs [source_code, target_code]. Must form a valid acyclic DAG.\n"
-        "7. CRITICAL LANGUAGE MANDATE: All titles and summaries MUST strictly be in the SAME LANGUAGE as the subject (Russian if Russian, English if English).\n\n"
+        "7. CRITICAL LANGUAGE MANDATE: All titles and summaries MUST strictly be in the SAME LANGUAGE as the subject (Russian if Russian, English if English).\n"
+        "8. CONSTITUTIONAL SAFETY & ETHICS MANDATE:\n"
+        "   - STRICTLY FORBIDDEN: Any concepts promoting weapons, explosives, illegal drug synthesis, malware creation, unauthorized cyberattacks, fraud, contemporary partisan politics, real-world military warfare/combat tactics, self-harm, or immoral/unethical behavior.\n"
+        "   - For dual-use domains (e.g. cybersecurity, pharmacology, law), frame all concepts strictly around DEFENSIVE mechanisms, hardening, ethical auditing, and foundational scientific principles.\n\n"
         "Return valid JSON matching this exact structure:\n"
         "{\n"
         '  "concepts": [\n'
@@ -279,7 +282,10 @@ class PlanPhaseManager:
         "   - Keep a clean, structured multi-module progression from big-picture to expert depths.\n"
         "4. Provide for each concept: code (e.g. 'M1.01'), title, summary (concise pedagogical preview), bloom_level, and is_already_mastered (boolean).\n"
         "5. Define all prerequisite dependency pairs [source_code, target_code]. Must form a valid acyclic DAG.\n"
-        "6. CRITICAL LANGUAGE MANDATE: All titles and summaries MUST strictly match the target language.\n\n"
+        "6. CRITICAL LANGUAGE MANDATE: All titles and summaries MUST strictly match the target language.\n"
+        "7. CONSTITUTIONAL SAFETY & ETHICS MANDATE:\n"
+        "   - STRICTLY FORBIDDEN: Any concepts detailing weapons, explosive fabrication, illegal drug synthesis, offensive malware, phishing, scams, contemporary political agitation, military combat operations, self-harm, or immoral/unethical conduct.\n"
+        "   - Reframe dual-use concepts solely around defense, security auditing, and constructive academic mastery.\n\n"
         "Return valid JSON matching this exact structure:\n"
         "{\n"
         '  "concepts": [\n'

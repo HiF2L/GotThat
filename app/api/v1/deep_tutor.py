@@ -16,6 +16,7 @@ from app.models.session import DeepLearningSession, DeepSessionStep
 from app.models.ontology import Concept
 from app.config import settings
 from app.services.ai.client import ai_clients
+from app.services.moderation import moderation_service
 from sqlalchemy import select, and_, delete
 
 logger = logging.getLogger("got_it.deep_tutor")
@@ -31,6 +32,12 @@ async def start_deep_session(
     Initializes a full Deep Learning Arc for a target concept.
     Begins in PROBING state to locate the knowledge edge.
     """
+    if request.initial_user_context and request.initial_user_context.strip():
+        await moderation_service.validate_or_raise(
+            text=request.initial_user_context,
+            context={"intent": "deep_session_init", "target_concept_id": request.target_concept_id},
+        )
+
     session = await tutor_state_machine.start_session(db, request)
     next_action = await tutor_state_machine.get_next_action(
         session=db,
@@ -234,6 +241,12 @@ async def ask_tutor_in_lesson(
     )
     concept = concept_res.scalars().first()
     concept_title = concept.title if concept else "Current Concept"
+
+    # Safety & Content Moderation Audit on student question
+    await moderation_service.validate_or_raise(
+        text=request.question,
+        context={"intent": "ask_tutor_question", "topic": concept_title},
+    )
 
     target_lang = getattr(deep_session, "language", None) or "ru"
     is_russian = (target_lang == "ru") or any('\u0400' <= char <= '\u04FF' for char in (request.question or ""))

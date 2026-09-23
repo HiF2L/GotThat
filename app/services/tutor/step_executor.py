@@ -68,7 +68,10 @@ class StepExecutor:
         "6. 'WHERE 90% STUMBLE' (Subtle Traps & Fallacies): Point out counter-intuitive misconceptions, subtle edge cases, or common fallacies that trap amateurs.\n"
         "7. HIGH INFORMATIONAL DENSITY: Deliver a comprehensive, deeply explanatory narrative (typically 700 to 1400 words of rich content). Never produce shallow or brief summaries.\n"
         "8. REAL-WORLD IMAGES: Set `needs_real_image: true` ONLY when an authentic real diagram, historical photo, micrograph, or official tech logo genuinely exists and clarifies the concept (e.g. 'Saturn V rocket F-1 engine', 'CRISPR Cas9 molecular complex', 'FastAPI framework logo'). Set `real_image_search_query` in English. If the topic is conceptual/theoretical and better illustrated by a vector schematic, set `needs_real_image: false`.\n"
-        "9. CRITICAL LANGUAGE MANDATE: All explanations, annotations, questions, and options MUST strictly be in the SAME LANGUAGE as the Concept Title (if in Russian, natural, expressive, academic Russian; if in English, English).\n\n"
+        "9. CRITICAL LANGUAGE MANDATE: All explanations, annotations, questions, and options MUST strictly be in the SAME LANGUAGE as the Concept Title (if in Russian, natural, expressive, academic Russian; if in English, English).\n"
+        "10. CONSTITUTIONAL SAFETY & ACADEMIC INTEGRITY:\n"
+        "    - STRICTLY FORBIDDEN: Any actionable instructions for manufacturing weapons, explosives, synthesizing illegal drugs, developing malware/exploits, carrying out fraud, promoting contemporary political propaganda/militarism, or engaging in immoral/unethical behavior.\n"
+        "    - If explaining cybersecurity or dual-use science, focus 100% on DEFENSIVE mitigations, secure design, and formal theory.\n\n"
         "Output JSON matching this structure:\n"
         "{\n"
         '  "explanation_markdown": "Exhaustive, storytelling-driven, first-principles tutorial text tailored to the domain with complete mechanics, formulas/sources/code, and real-world depth",\n'
@@ -126,13 +129,8 @@ class StepExecutor:
         from app.core.slug import generate_slug
         c_slug = concept.slug or generate_slug(concept.title)
 
-        exp_md = step.explanation_markdown or ""
-        clean_exp = exp_md.strip()
-        if (clean_exp.startswith("{") and '"explanation' in clean_exp) or (clean_exp.startswith("```json") and '"explanation' in clean_exp):
-            from app.services.ai.client import extract_json_or_fallback
-            obj = extract_json_or_fallback(clean_exp)
-            if obj and isinstance(obj, dict):
-                exp_md = obj.get("explanation_markdown") or obj.get("explanation") or exp_md
+        from app.services.ai.client import sanitize_markdown_text
+        exp_md = sanitize_markdown_text(step.explanation_markdown or "")
 
         return DeepStepPayload(
             session_id=deep_session.id,
@@ -237,15 +235,6 @@ class StepExecutor:
                         user_notes=user_notes,
                     )
                     logger.info(f"Pre-generation complete for '{concept.title}'. Cached for instant navigation.")
-
-                    # Speculatively synthesize speech audio into TTS cache
-                    if step_payload and step_payload.explanation_markdown:
-                        try:
-                            from app.services.ai.tts_service import tts_service
-                            await tts_service.synthesize_speech(step_payload.explanation_markdown)
-                            logger.info(f"Speculatively pre-synthesized audio for '{concept.title}'.")
-                        except Exception as tts_err:
-                            logger.debug(f"Audio prefetch skipped: {tts_err}")
             except Exception as e:
                 logger.warning(f"Background prefetching for concept {concept_id} skipped or failed: {e}")
             finally:
@@ -643,7 +632,9 @@ class StepExecutor:
                 explanation = raw_chat_resp.strip()
 
         # Bulletproof check: Guarantee explanation is never a raw JSON dump
-        clean_exp = (explanation or "").strip()
+        from app.services.ai.client import sanitize_markdown_text
+        explanation = sanitize_markdown_text(explanation or "").strip()
+        clean_exp = explanation
         if (clean_exp.startswith("{") and '"explanation' in clean_exp) or (clean_exp.startswith("```json") and '"explanation' in clean_exp):
             from app.services.ai.client import extract_json_or_fallback
             extracted_obj = extract_json_or_fallback(clean_exp)
@@ -671,55 +662,36 @@ class StepExecutor:
         ) if isinstance(llm_response, dict) else {}
 
         # 3, 4 & 5. Run Subagents in Parallel: Fact-Check, SVG Visualizer, and Real Internet Image Finder
-        async def run_visual():
-            if needs_visual:
-                try:
-                    return await asyncio.wait_for(
-                        visualizer.generate_visualization(
-                            concept_title=concept.title,
-                            explanation_context=explanation,
-                            target_aspect=visual_desc,
-                        ),
-                        timeout=22.0,
-                    )
-                except Exception as e:
-                    logger.warning(f"SVG visualizer timed out or failed: {e}")
-            return None
-
-        async def run_fact_check():
+        # 3 & 4. Primary Visual Pipeline: Check authentic images first (0 API tokens, fast <0.5s HTTP lookup)
+        img_result = None
+        effective_query = image_query or concept.title
+        if effective_query and len(effective_query.strip()) >= 2:
             try:
-                return await asyncio.wait_for(
-                    fact_checker.verify_concept_explanation(
+                img_result = await asyncio.wait_for(
+                    image_finder.find_educational_image(
+                        query=effective_query,
                         concept_title=concept.title,
-                        explanation_markdown=explanation,
                     ),
-                    timeout=8.0,
+                    timeout=5.0,
                 )
             except Exception as e:
-                logger.warning(f"Fact checker timed out or failed: {e}")
-            return None
+                logger.warning(f"Image search timed out or failed: {e}")
 
-        async def run_image_search():
-            effective_query = image_query or concept.title
-            if effective_query and len(effective_query.strip()) >= 2:
-                try:
-                    return await asyncio.wait_for(
-                        image_finder.find_educational_image(
-                            query=effective_query,
-                            concept_title=concept.title,
-                        ),
-                        timeout=5.0,
-                    )
-                except Exception as e:
-                    logger.warning(f"Image search timed out or failed: {e}")
-            return None
-
-        svg_result, _, img_result = await asyncio.gather(
-            run_visual(),
-            run_fact_check(),
-            run_image_search(),
-            return_exceptions=True,
-        )
+        # If no authentic image was found and a diagram is requested, generate an SVG schematic
+        svg_result = None
+        has_real_image = isinstance(img_result, dict) and bool(img_result.get("url"))
+        if not has_real_image and needs_visual:
+            try:
+                svg_result = await asyncio.wait_for(
+                    visualizer.generate_visualization(
+                        concept_title=concept.title,
+                        explanation_context=explanation,
+                        target_aspect=visual_desc,
+                    ),
+                    timeout=15.0,
+                )
+            except Exception as e:
+                logger.warning(f"SVG visualizer timed out or failed: {e}")
 
         visual_artifact = None
 

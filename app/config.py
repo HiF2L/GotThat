@@ -3,9 +3,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Main LLM Provider (Provod.ai / OpenAI compatible)
+    # Main LLM Provider (ProxyAPI / OpenAI compatible)
     OPENAI_API_KEY: str = ""
-    OPENAI_BASE_URL: str = "https://api.provod.ai/v1"
+    OPENAI_BASE_URL: str = "https://api.proxyapi.ru/v1"
 
     # Dedicated Speech-to-Text Provider (ProxyAPI)
     STT_API_KEY: str = ""
@@ -19,11 +19,12 @@ class Settings(BaseSettings):
     TTS_MODEL: str = "gpt-4o-mini-tts"
     TTS_VOICE: str = "ru-RU-SvetlanaNeural"
 
-    # AI Model Names on Provod.ai
-    DEEP_MODEL: str = "kimi-k3"
-    PLAN_MODEL: str = "gemini-3-flash-preview"
-    FAST_MODEL: str = "gemini-3-flash-preview"
-    VISION_MODEL: Optional[str] = "gemini-3-flash-preview"
+    # AI Model Names on ProxyAPI
+    DEEP_MODEL: str = "openai/gpt-4.1-mini"
+    PLAN_MODEL: str = "openai/gpt-4.1-mini"
+    FAST_MODEL: str = "openai/gpt-4.1-mini"
+    VISION_MODEL: Optional[str] = "google/gemini-2.5-flash"
+
 
     # Database
     DATABASE_URL: str = "sqlite+aiosqlite:///./got_it.db"

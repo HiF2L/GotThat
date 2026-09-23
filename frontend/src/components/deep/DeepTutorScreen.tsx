@@ -35,6 +35,7 @@ interface DeepTutorScreenProps {
   language?: 'ru' | 'en';
   currentModel?: string;
   ttsVoice?: string;
+  skipProbing?: boolean;
   onNavigateToFeed?: () => void;
   onNavigateToMap?: () => void;
   onActiveConceptChange?: (conceptId: string, trackId?: string) => void;
@@ -47,6 +48,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   language = 'ru',
   currentModel = 'kimi-k3',
   ttsVoice = 'alloy',
+  skipProbing = false,
   onNavigateToFeed,
   onNavigateToMap,
   onActiveConceptChange,
@@ -67,15 +69,31 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   const [isProbeTranscribing, setIsProbeTranscribing] = useState<boolean>(false);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState<boolean>(false);
   const [selectedProbeOptionId, setSelectedProbeOptionId] = useState<string | null>(null);
+  const [loadingProgress, setLoadingProgress] = useState<number>(15);
+  const [loadingTimeLeft, setLoadingTimeLeft] = useState<number>(8);
+
+  useEffect(() => {
+    if (!loading) {
+      setLoadingProgress(15);
+      setLoadingTimeLeft(8);
+      return;
+    }
+    const timer = setInterval(() => {
+      setLoadingProgress((prev) => (prev < 90 ? prev + Math.floor(Math.random() * 8) + 4 : Math.min(prev + 1, 95)));
+      setLoadingTimeLeft((prev) => (prev > 1 ? prev - 1 : 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loading]);
 
   const loadedTargetRef = useRef<string | undefined>(undefined);
   const isNavigatingRef = useRef<boolean>(false);
+  const isStartingSessionRef = useRef<boolean>(false);
 
   // Lazy & idempotent session start (only triggered when tab is active and target has changed)
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive || !targetConceptId) return;
 
-    if (targetConceptId && targetConceptId !== loadedTargetRef.current) {
+    if (targetConceptId !== loadedTargetRef.current) {
       const isAlreadyActive =
         currentStep &&
         (currentStep.concept_id === targetConceptId ||
@@ -83,31 +101,40 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
           currentStep.track_id === targetConceptId ||
           currentStep.track_slug === targetConceptId);
 
-      if (!isAlreadyActive) {
+      if (!isAlreadyActive && !isStartingSessionRef.current) {
         loadedTargetRef.current = targetConceptId;
         startSession(targetConceptId);
       }
-    } else if (!sessionId && targetConceptId) {
-      loadedTargetRef.current = targetConceptId;
+    } else if (!sessionId && !isStartingSessionRef.current) {
       startSession(targetConceptId);
     }
-  }, [targetConceptId, isActive, sessionId, currentStep?.concept_id]);
+  }, [targetConceptId, isActive]);
 
   // Initialize Deep Learning Session
-  const startSession = async (conceptId?: string) => {
+  const startSession = async (conceptId?: string, overrideSkipProbing?: boolean) => {
+    if (isStartingSessionRef.current) return;
+    isStartingSessionRef.current = true;
     setProbeQuestion(null);
     setSelectedProbeOptionId(null);
+    setCurrentStep(null); // CRITICAL: Reset step so old lesson never renders below probing test!
+    setDagPlan(null);
     setLoading(true);
     setLoadingMessage('Загрузка материалов курса из базы знаний...');
 
     try {
       const target = conceptId || targetConceptId || '';
       loadedTargetRef.current = target;
+      if (target) {
+        localStorage.setItem('got_it_deep_concept_id', target);
+      }
+      const effectiveSkipProbing = overrideSkipProbing !== undefined ? overrideSkipProbing : Boolean(skipProbing);
       const res = await apiClient.startDeepSession(
         userId,
         target,
         yapNote || 'Starting study session.',
         language,
+        undefined,
+        effectiveSkipProbing,
       );
       setSessionId(res.session_id);
       handleTutorActionResponse(res.initial_action, res.session_id);
@@ -115,6 +142,8 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       console.error('Failed to start deep session:', err);
       alert('Could not start deep session. Ensure backend is running.');
       setLoading(false);
+    } finally {
+      isStartingSessionRef.current = false;
     }
   };
 
@@ -125,6 +154,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setCurrentPhase(phase);
 
     if (phase === 'probing') {
+      setCurrentStep(null); // Explicitly ensure currentStep is null during probing
       setProbeQuestion(actionData.probe_question);
       setLoading(false);
     } else if (phase === 'plan_ready') {
@@ -267,10 +297,38 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     (n) => n.id === currentStep?.concept_id || n.slug === currentStep?.concept_slug
   ) ?? -1;
 
+  const nodes = dagPlan?.nodes || [];
   const hasPrev = currentConceptIdx > 0;
-  const hasNext = dagPlan?.nodes && currentConceptIdx >= 0 && currentConceptIdx < dagPlan.nodes.length - 1;
   const prevNode = hasPrev && dagPlan?.nodes ? dagPlan.nodes[currentConceptIdx - 1] : null;
-  const nextNode = hasNext && dagPlan?.nodes ? dagPlan.nodes[currentConceptIdx + 1] : null;
+
+  // Cyclic Gap Discovery: find the first unmastered node forward, or wrap-around from beginning
+  const nextTargetNode = (() => {
+    if (!nodes || nodes.length === 0) return null;
+    // 1. Forward scan: look for first unmastered node ahead
+    if (currentConceptIdx >= 0) {
+      for (let i = currentConceptIdx + 1; i < nodes.length; i++) {
+        if (nodes[i].status !== 'completed') {
+          return nodes[i];
+        }
+      }
+    }
+    // 2. Wrap-around scan: check from start (0 .. currentConceptIdx)
+    const maxWrap = currentConceptIdx >= 0 ? currentConceptIdx : nodes.length;
+    for (let i = 0; i < maxWrap; i++) {
+      if (nodes[i].status !== 'completed') {
+        return nodes[i];
+      }
+    }
+    // 3. If all nodes are already mastered, fall back to sequential next if available
+    if (currentConceptIdx >= 0 && currentConceptIdx + 1 < nodes.length) {
+      return nodes[currentConceptIdx + 1];
+    }
+    return null;
+  })();
+
+  const hasUnmasteredAnywhere = nodes.some((n, idx) => idx !== currentConceptIdx && n.status !== 'completed');
+  const hasNext = nodes.length > 1 && (currentConceptIdx < nodes.length - 1 || hasUnmasteredAnywhere);
+  const nextNode = nextTargetNode;
 
   const handleProceedPrevStep = () => {
     if (loading || isNavigatingRef.current) return;
@@ -288,13 +346,14 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       return;
     }
 
-    if (currentConceptIdx >= 0 && currentConceptIdx + 1 < dagPlan.nodes.length) {
-      const nextNode = dagPlan.nodes[currentConceptIdx + 1];
-      handleSelectConceptNode(nextNode.id);
+    // Advance to next unmastered node (cyclic) or conclude course if 100% completed
+    if (nextTargetNode) {
+      handleSelectConceptNode(nextTargetNode.id);
     } else if (sessionId) {
       requestNextAction(sessionId);
     }
   };
+
 
   const handleSelectConceptNode = async (conceptId: string) => {
     if (!userId || loading || isNavigatingRef.current) return;
@@ -459,41 +518,58 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             </div>
           </div>
 
-          {/* Quick-Advance to Course Plan Button */}
-          {probeQuestion.probe_index && probeQuestion.probe_index >= 2 && (
-            <div className="pt-2.5 border-t border-slate-800 flex justify-end">
-              <button
-                onClick={() => handleAnswerProbe('generate_plan_now')}
-                disabled={loading}
-                className="px-4 py-2.5 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 hover:text-white rounded-xl text-xs font-bold border border-indigo-500/40 transition-all flex items-center gap-2 shadow-lg"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>Ready to start? Generate My Course Plan</span>
-              </button>
-            </div>
-          )}
+          {/* Quick-Advance to Course Plan Button (Always Available) */}
+          <div className="pt-3 border-t border-slate-800 flex items-center justify-between flex-wrap gap-2">
+            <span className="text-[11px] text-slate-400">
+              Хотите пропустить диагностику и сразу начать уроки?
+            </span>
+            <button
+              onClick={() => handleAnswerProbe('generate_plan_now')}
+              disabled={loading}
+              className="px-4 py-2 bg-indigo-600/30 hover:bg-indigo-600 text-indigo-200 hover:text-white rounded-xl text-xs font-bold border border-indigo-500/40 transition-all flex items-center gap-2 shadow-lg cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-indigo-300" />
+              <span>Пропустить тест и перейти к урокам</span>
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Live AI Status */}
+      {/* Live AI Status with Visual Progress */}
       {loading && (
-        <div className="p-6 rounded-3xl bg-surface-900 border border-indigo-500/30 shadow-xl space-y-3 max-w-2xl mx-auto w-full animate-fadeIn">
-          <div className="flex items-center gap-2 text-indigo-400 text-xs font-bold uppercase tracking-wider">
-            <Cpu className="w-4 h-4 animate-pulse" />
-            <span>{activeModelDisplayName}</span>
+        <div className="p-6 rounded-3xl bg-surface-900 border border-indigo-500/30 shadow-xl space-y-4 max-w-2xl mx-auto w-full animate-fadeIn">
+          <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider">
+            <div className="flex items-center gap-2 text-indigo-400">
+              <Cpu className="w-4 h-4 animate-pulse" />
+              <span>{activeModelDisplayName}</span>
+            </div>
+            <span className="text-slate-400 font-medium">
+              {loadingTimeLeft > 0 ? `Осталось примерно: ~${loadingTimeLeft} сек` : 'Завершение обработки...'}
+            </span>
           </div>
 
-          <div className="p-4 bg-surface-950 rounded-2xl border border-slate-800 flex items-center gap-3.5">
-            <Loader2 className="w-6 h-6 text-indigo-400 animate-spin shrink-0" />
-            <div className="text-xs text-slate-200">
-              <p className="font-semibold text-sm">{loadingMessage}</p>
+          <div className="p-4 bg-surface-950 rounded-2xl border border-slate-800 space-y-2.5">
+            <div className="flex items-center justify-between text-xs text-slate-200">
+              <div className="flex items-center gap-2">
+                <Loader2 className="w-4 h-4 text-indigo-400 animate-spin shrink-0" />
+                <span className="font-semibold text-sm">{loadingMessage}</span>
+              </div>
+              <span className="text-indigo-400 font-bold">{loadingProgress}%</span>
+            </div>
+
+            {/* Progress track */}
+            <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-indigo-500 via-sky-400 to-emerald-400 transition-all duration-300 rounded-full"
+                style={{ width: `${loadingProgress}%` }}
+              />
             </div>
           </div>
         </div>
       )}
 
       {/* Floating Side Navigation Chevrons ("<" and ">") */}
-      {!loading && currentStep && (
+      {!loading && currentStep && currentPhase !== 'probing' && (
         <>
           {/* Left Chevron ("<") */}
           {hasPrev && (
@@ -522,7 +598,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       )}
 
       {/* State: Teaching or Reviewing Completed Course (Centered Single Column Layout) */}
-      {!loading && currentStep && (
+      {!loading && currentStep && currentPhase !== 'probing' && (
         <div className="max-w-4xl mx-auto w-full space-y-6 animate-fadeIn relative">
           {/* 1. Main Lesson Content + Visuals + Unified AI Interactive Hub */}
           <StepViewer

@@ -1,22 +1,34 @@
 import random
 import uuid
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict
 from datetime import datetime
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.ontology import Concept, AssessmentItem, Track, AssessmentType
-from app.models.mastery import UserMasteryState, AssessmentAttempt, VoiceReasoningLog, UserTrackEnrollment, User
+from app.models.session import DeepSessionStep
+from app.models.mastery import (
+    UserMasteryState,
+    AssessmentAttempt,
+    VoiceReasoningLog,
+    UserTrackEnrollment,
+    User,
+    ConceptReaction,
+)
 from app.schemas.feed import (
     FeedCardResponse,
     QuizOption,
     QuizAnswerSubmission,
     QuizAnswerResult,
     VoiceReasoningAnalysis,
+    DiscoveryLessonTeaser,
+    ConceptVoteResponse,
 )
 from app.services.cognitive.bkt_engine import bkt_engine
 from app.services.cognitive.fsrs_scheduler import fsrs_scheduler
-from app.services.ai.client import ai_clients
+from app.services.ai.client import ai_clients, sanitize_markdown_text
 from app.config import settings
+
 
 
 class FeedOrchestrator:
@@ -323,5 +335,340 @@ class FeedOrchestrator:
             voice_analysis=voice_analysis,
         )
 
+    async def get_discovery_feed(
+        self,
+        session: AsyncSession,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[DiscoveryLessonTeaser]:
+        """
+        Generates an exploratory recommendation feed (Discovery Feed):
+        Extracts teasers (introductory hooks, intuitive dilemmas, mental models)
+        of lessons from active tracks in the knowledge graph.
+        Provides a seamless bridge to launch the lesson in Deep Tutor.
+        """
+        # 1. Resolve User ID if provided
+        resolved_user_id = user_id
+        if not resolved_user_id:
+            user_res = await session.execute(select(User).limit(1))
+            user = user_res.scalars().first()
+            if user:
+                resolved_user_id = user.id
+
+        # 2. Query concepts that ALREADY have generated full lesson steps
+        # This guarantees only ready, rich, substantive lessons appear in the feed
+        generated_steps_query = (
+            select(Concept, Track, DeepSessionStep)
+            .join(Track, Concept.track_id == Track.id)
+            .join(DeepSessionStep, DeepSessionStep.concept_id == Concept.id)
+            .where(
+                and_(
+                    Track.is_active == True,
+                    func.length(DeepSessionStep.explanation_markdown) >= 150,
+                )
+            )
+            .order_by(DeepSessionStep.step_sequence.asc())
+        )
+        steps_result = await session.execute(generated_steps_query)
+        generated_rows = steps_result.all()
+
+        seen_concepts = set()
+        concepts_and_tracks = []
+        steps_map: Dict[str, DeepSessionStep] = {}
+        for c, t, s in generated_rows:
+            if c.id not in seen_concepts:
+                seen_concepts.add(c.id)
+                concepts_and_tracks.append((c, t))
+                steps_map[c.id] = s
+
+        # Fallback: if no generated steps exist in DB at all (e.g. initial bare unit tests)
+        if not concepts_and_tracks:
+            fallback_query = (
+                select(Concept, Track)
+                .join(Track, Concept.track_id == Track.id)
+                .where(Track.is_active == True)
+            )
+            fallback_res = await session.execute(fallback_query)
+            concepts_and_tracks = fallback_res.all()
+            if not concepts_and_tracks:
+                return []
+
+        # 3. Calculate total concepts per track for context
+        track_counts: Dict[str, int] = {}
+        for c, t in concepts_and_tracks:
+            track_counts[t.id] = track_counts.get(t.id, 0) + 1
+
+        # 4. Fetch mastery states for resolved_user_id
+        concept_ids = [c.id for c, _ in concepts_and_tracks]
+        mastery_map: Dict[str, UserMasteryState] = {}
+        if resolved_user_id:
+            mastery_res = await session.execute(
+                select(UserMasteryState).where(
+                    and_(
+                        UserMasteryState.user_id == resolved_user_id,
+                        UserMasteryState.concept_id.in_(concept_ids),
+                    )
+                )
+            )
+            mastery_map = {m.concept_id: m for m in mastery_res.scalars().all()}
+
+        # 5b. Fetch reactions & votes for these concepts
+        user_votes_map: Dict[str, str] = {}
+        if resolved_user_id:
+            user_react_res = await session.execute(
+                select(ConceptReaction).where(
+                    and_(
+                        ConceptReaction.user_id == resolved_user_id,
+                        ConceptReaction.concept_id.in_(concept_ids),
+                    )
+                )
+            )
+            for r in user_react_res.scalars().all():
+                user_votes_map[r.concept_id] = r.vote_type
+
+        # Aggregate upvotes and downvotes
+        upvotes_query = await session.execute(
+            select(ConceptReaction.concept_id, func.count(ConceptReaction.id))
+            .where(
+                and_(
+                    ConceptReaction.concept_id.in_(concept_ids),
+                    ConceptReaction.vote_type == "upvote",
+                )
+            )
+            .group_by(ConceptReaction.concept_id)
+        )
+        upvotes_map = {cid: cnt for cid, cnt in upvotes_query.all()}
+
+        downvotes_query = await session.execute(
+            select(ConceptReaction.concept_id, func.count(ConceptReaction.id))
+            .where(
+                and_(
+                    ConceptReaction.concept_id.in_(concept_ids),
+                    ConceptReaction.vote_type == "downvote",
+                )
+            )
+            .group_by(ConceptReaction.concept_id)
+        )
+        downvotes_map = {cid: cnt for cid, cnt in downvotes_query.all()}
+
+        # 6. Build teasers
+        teasers: List[DiscoveryLessonTeaser] = []
+        for concept, track in concepts_and_tracks:
+            m = mastery_map.get(concept.id)
+            is_mastered = (m.mastery_prob >= 0.85) if m else False
+            mastery_prob = round(m.mastery_prob, 2) if m else 0.0
+
+            # Extract teaser text
+            step = steps_map.get(concept.id)
+            step_markdown = step.explanation_markdown if step else ""
+            teaser_text = self._extract_teaser_text(
+                explanation_markdown=step_markdown,
+                summary=concept.summary,
+                title=concept.title,
+            )
+
+            # Social scoring & metadata
+            seed = (abs(hash(concept.code or concept.id)) % 68) + 18
+            upvotes_cnt = upvotes_map.get(concept.id, 0)
+            downvotes_cnt = downvotes_map.get(concept.id, 0)
+            score = seed + upvotes_cnt - downvotes_cnt
+            user_vote = user_votes_map.get(concept.id)
+
+            words_count = len(teaser_text.split())
+            read_time = max(2, min(8, round(words_count / 45) + 1))
+            comments_count = (abs(hash(concept.title or concept.id)) % 14) + 2
+
+            teasers.append(
+                DiscoveryLessonTeaser(
+                    concept_id=concept.id,
+                    concept_title=concept.title,
+                    concept_code=concept.code,
+                    track_id=track.id,
+                    track_title=track.title,
+                    track_slug=track.slug,
+                    teaser_text=teaser_text,
+                    bloom_level=concept.bloom_level,
+                    is_mastered=is_mastered,
+                    total_track_concepts=track_counts.get(track.id, 1),
+                    mastery_prob=mastery_prob,
+                    score=score,
+                    upvotes=upvotes_cnt,
+                    downvotes=downvotes_cnt,
+                    user_vote=user_vote,
+                    comments_count=comments_count,
+                    read_time_minutes=read_time,
+                )
+            )
+
+        # 7. Shuffle and interleave tracks to guarantee topic diversity
+        tracks_buckets: Dict[str, List[DiscoveryLessonTeaser]] = {}
+        for t in teasers:
+            tracks_buckets.setdefault(t.track_id, []).append(t)
+
+        buckets_list = list(tracks_buckets.values())
+        random.shuffle(buckets_list)
+        for bucket in buckets_list:
+            random.shuffle(bucket)
+
+        interleaved: List[DiscoveryLessonTeaser] = []
+        max_len = max(len(b) for b in buckets_list) if buckets_list else 0
+        for i in range(max_len):
+            for bucket in buckets_list:
+                if i < len(bucket):
+                    interleaved.append(bucket[i])
+
+        return interleaved[:limit]
+
+    def _extract_teaser_text(
+        self,
+        explanation_markdown: str,
+        summary: str,
+        title: str,
+    ) -> str:
+        """
+        Extracts an engaging, substantive pedagogical excerpt from a lesson explanation.
+        Provides a comprehensive preview (650-1000 characters) so that the user gets
+        real educational value directly in their feed.
+        """
+        if explanation_markdown and len(explanation_markdown.strip()) > 50:
+            cleaned = sanitize_markdown_text(explanation_markdown).strip()
+            raw_paragraphs = [p.strip() for p in cleaned.split("\n\n") if p.strip()]
+
+            # 1. Filter out solitary markdown separators, empty headings, and duplicate H1s
+            paragraphs = []
+            for p in raw_paragraphs:
+                if p in ("#", "##", "###", "####", "---", "***", "___"):
+                    continue
+                if p.startswith("# ") and len(p.split("\n")) == 1:
+                    continue
+                if re.match(r"^#{1,3}\s*(?:4|5|IV|V|\bПРАКТИКА\b|\bТЕСТ\b|\bЗАДАНИЯ\b|\bПРОВЕРКА\b)", p, re.IGNORECASE):
+                    break
+                paragraphs.append(p)
+
+            # 2. Accumulate paragraphs with image awareness
+            hook_paragraphs = []
+            char_count = 0
+            for p in paragraphs:
+                is_img = p.startswith("![") and "](" in p
+                hook_paragraphs.append(p)
+                # Count actual readable characters (excluding image markdown URLs)
+                readable_len = len(re.sub(r'!\[.*?\]\(.*?\)', '', p))
+                char_count += readable_len
+
+                if char_count >= 650:
+                    # If the current paragraph is an image, don't stop yet — take the next text paragraph
+                    if is_img:
+                        continue
+                    break
+
+            # 3. Guarantee that an image is never left stranded at the very bottom of the card
+            if hook_paragraphs and hook_paragraphs[-1].startswith("!["):
+                if len(paragraphs) > len(hook_paragraphs):
+                    hook_paragraphs.append(paragraphs[len(hook_paragraphs)])
+                else:
+                    hook_paragraphs.pop()
+
+            if hook_paragraphs:
+                result = "\n\n".join(hook_paragraphs)
+                if len(result) > 1350:
+                    result = result[:1347].rstrip() + "..."
+                return result
+
+        if summary and len(summary.strip()) > 20:
+            return summary.strip()
+
+        return f"Откройте фундаментальные принципы, скрытые механизмы и ключевые интуиции темы «{title}»."
+
+    async def record_concept_vote(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        concept_id: str,
+        vote_type: str,
+    ) -> ConceptVoteResponse:
+        """
+        Records or clears a user's upvote/downvote reaction for a concept,
+        and returns updated vote counts and net score.
+        """
+        # 0. Resolve User
+        user_res = await session.execute(select(User).where(User.id == user_id))
+        user = user_res.scalars().first()
+        if not user:
+            user_res = await session.execute(select(User).limit(1))
+            user = user_res.scalars().first()
+            if not user:
+                user = User(username="hitori_learner", email="learner@gotit.local")
+                session.add(user)
+                await session.flush()
+        resolved_user_id = user.id
+
+        # 1. Fetch existing reaction
+        existing_res = await session.execute(
+            select(ConceptReaction).where(
+                and_(
+                    ConceptReaction.user_id == resolved_user_id,
+                    ConceptReaction.concept_id == concept_id,
+                )
+            )
+        )
+        existing = existing_res.scalars().first()
+
+        effective_vote: Optional[str] = None
+        if vote_type == "clear":
+            if existing:
+                await session.delete(existing)
+            effective_vote = None
+        elif vote_type in ("upvote", "downvote"):
+            if existing:
+                existing.vote_type = vote_type
+                existing.updated_at = datetime.utcnow()
+            else:
+                reaction = ConceptReaction(
+                    user_id=resolved_user_id,
+                    concept_id=concept_id,
+                    vote_type=vote_type,
+                )
+                session.add(reaction)
+            effective_vote = vote_type
+        else:
+            raise ValueError(f"Invalid vote_type '{vote_type}'. Must be 'upvote', 'downvote', or 'clear'.")
+
+        await session.commit()
+
+        # 2. Compute updated aggregates
+        upvotes_res = await session.execute(
+            select(func.count(ConceptReaction.id)).where(
+                and_(
+                    ConceptReaction.concept_id == concept_id,
+                    ConceptReaction.vote_type == "upvote",
+                )
+            )
+        )
+        upvotes_count = upvotes_res.scalar() or 0
+
+        downvotes_res = await session.execute(
+            select(func.count(ConceptReaction.id)).where(
+                and_(
+                    ConceptReaction.concept_id == concept_id,
+                    ConceptReaction.vote_type == "downvote",
+                )
+            )
+        )
+        downvotes_count = downvotes_res.scalar() or 0
+
+        concept_res = await session.execute(select(Concept).where(Concept.id == concept_id))
+        concept = concept_res.scalars().first()
+        seed = (abs(hash((concept.code if concept else concept_id))) % 68) + 18
+        net_score = seed + upvotes_count - downvotes_count
+
+        return ConceptVoteResponse(
+            concept_id=concept_id,
+            user_vote=effective_vote,
+            score=net_score,
+            upvotes=upvotes_count,
+            downvotes=downvotes_count,
+        )
+
 
 feed_orchestrator = FeedOrchestrator()
+

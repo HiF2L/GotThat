@@ -74,117 +74,93 @@ export const AVAILABLE_TTS_VOICES: TtsVoiceOption[] = [
 ];
 
 export const AVAILABLE_AI_MODELS: AIModelOption[] = [
-  // 🔮 Google Gemini
-  {
-    id: 'gemini-3.1-pro',
-    name: 'Gemini 3.1 Pro Preview',
-    provider: 'Google Gemini',
-    providerIcon: '🔮',
-    price: '170,26 ₽ / 1 021,55 ₽',
-    description: 'Глубокое рассуждение и академический синтез сложных тем',
-  },
-  {
-    id: 'gemini-3-flash',
-    name: 'Gemini 3 Flash Preview',
-    provider: 'Google Gemini',
-    providerIcon: '🔮',
-    price: '42,56 ₽ / 255,39 ₽',
-    description: 'Быстрый инференс и оперативная проверка ответов',
-  },
-
-  // 🧠 Anthropic
-  {
-    id: 'claude-opus-4.6',
-    name: 'Claude Opus 4.6',
-    provider: 'Anthropic',
-    providerIcon: '🧠',
-    price: '425,65 ₽ / 2 128,23 ₽',
-    description: 'Максимальная глубина аналитического разбора',
-  },
-  {
-    id: 'claude-opus-5',
-    name: 'Claude Opus 5',
-    provider: 'Anthropic',
-    providerIcon: '🧠',
-    price: '425,65 ₽ / 2 128,23 ₽',
-    description: 'Флагманский интеллект для сложнейших технических доменов',
-  },
-  {
-    id: 'claude-sonnet-5',
-    name: 'Claude Sonnet 5',
-    provider: 'Anthropic',
-    providerIcon: '🧠',
-    price: '170,26 ₽ / 851,29 ₽',
-    description: 'Баланс педагогики Фейнмана, скорости и строгости',
-  },
-
   // 🟩 OpenAI
   {
-    id: 'gpt-5.4',
-    name: 'GPT‑5.4',
-    provider: 'OpenAI',
+    id: 'openai/gpt-4.1-mini',
+    name: 'GPT‑4.1 Mini',
+    provider: 'OpenAI (ProxyAPI)',
     providerIcon: '🟩',
-    price: '212,82 ₽ / 1 276,94 ₽',
-    description: 'Универсальный интеллект для широкого спектра дисциплин',
-  },
-  {
-    id: 'gpt-5.6-sol',
-    name: 'GPT‑5.6 Sol',
-    provider: 'OpenAI',
-    providerIcon: '🟩',
-    price: '425,65 ₽ / 2 553,88 ₽',
-    description: 'Научное рассуждение с высокой точностью формул',
-  },
-
-  // 🟥 Qwen
-  {
-    id: 'qwen3.7-max',
-    name: 'Qwen3.7 Max',
-    provider: 'Qwen',
-    providerIcon: '🟥',
-    price: '102,16 ₽ / 510,78 ₽',
-    description: 'Мощная модель для программирования и математики',
-  },
-
-  // 🌙 Moonshot AI
-  {
-    id: 'kimi-k3',
-    name: 'Kimi K3',
-    provider: 'Moonshot AI',
-    providerIcon: '🌙',
-    price: '255,39 ₽ / 1 276,94 ₽',
-    description: 'Основная модель курса: длинный контекст, строгая логика и DAG-планирование',
+    price: '104 ₽ / 413 ₽',
+    description: 'Основная модель уроков: эталонная математическая строгость LaTeX, высокая скорость (136 tok/s) и лучшая цена',
     badge: 'Рекомендуется',
   },
 
-  // 🟦 Z.ai (GLM)
+  // 🔮 Google Gemini
   {
-    id: 'glm-5.2',
-    name: 'GLM 5.2',
-    provider: 'Z.ai (GLM)',
-    providerIcon: '🟦',
-    price: '119,18 ₽ / 374,57 ₽',
-    description: 'Высокая эффективность при генерации структурированных концептов',
+    id: 'google/gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
+    provider: 'Google Gemini',
+    providerIcon: '🔮',
+    price: '78 ₽ / 645 ₽',
+    description: 'Сверхбыстрый инференс (182 tok/s), контекст 1M токенов, живые метафоры и мультимодальность',
+    badge: 'Суперскорость',
+  },
+  {
+    id: 'google/gemini-3-flash-preview',
+    name: 'Gemini 3 Flash Preview',
+    provider: 'Google Gemini',
+    providerIcon: '🔮',
+    price: '152 ₽ / 910 ₽',
+    description: 'Интеллектуальный синтез курсов, построение адаптивных DAG-маршрутов на 25-35 уроков',
+  },
+  {
+    id: 'google/gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
+    provider: 'Google Gemini',
+    providerIcon: '🔮',
+    price: '323 ₽ / 2 577 ₽',
+    description: 'Глубокое мультимодальное рассуждение и академический синтез сложных тем',
   },
 
   // ⚡ DeepSeek
   {
-    id: 'deepseek-v4-pro',
+    id: 'deepseek/deepseek-chat',
+    name: 'DeepSeek V3 (Chat)',
+    provider: 'DeepSeek',
+    providerIcon: '⚡',
+    price: '43 ₽ / 126 ₽',
+    description: 'Ультрадоступная модель для точных наук, физики, математических формул и программного кода',
+    badge: 'Экономный выбор',
+  },
+  {
+    id: 'deepseek/deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
     provider: 'DeepSeek',
     providerIcon: '⚡',
-    price: '37,03 ₽ / 74,06 ₽',
-    description: 'Выдающаяся экономичность и отличное понимание алгоритмов',
+    price: '190 ₽ / 375 ₽',
+    description: 'Выдающаяся аналитическая глубина и отличное понимание сложных алгоритмов',
+  },
+
+  // 🧠 Anthropic
+  {
+    id: 'anthropic/claude-sonnet-4-5',
+    name: 'Claude Sonnet 4.5',
+    provider: 'Anthropic',
+    providerIcon: '🧠',
+    price: '774 ₽ / 3 866 ₽',
+    description: 'Шедевральная проза: максимальная глубина нарратива, философия, история и психология без клише',
+    badge: 'Премиум проза',
   },
   {
-    id: 'deepseek-v4-flash',
-    name: 'DeepSeek V4 Flash 0423 / 0731',
-    provider: 'DeepSeek',
-    providerIcon: '⚡',
-    price: '11,92 ₽ / 23,84 ₽',
-    description: 'Сверхбыстрый инференс для оперативных подсказок',
+    id: 'anthropic/claude-opus-4-1',
+    name: 'Claude Opus 4.1',
+    provider: 'Anthropic',
+    providerIcon: '🧠',
+    price: '3 866 ₽ / 19 327 ₽',
+    description: 'Флагманский аналитический интеллект для сложнейших междисциплинарных исследований',
+  },
+
+  // 🌙 Moonshot AI
+  {
+    id: 'moonshotai/kimi-k3',
+    name: 'Kimi K3',
+    provider: 'Moonshot AI',
+    providerIcon: '🌙',
+    price: '550 ₽ / 2 700 ₽',
+    description: 'Длинный контекст, строгая логика рассуждений и структурированный вывод',
   },
 ];
+
 
 interface SettingsModalProps {
   isOpen: boolean;

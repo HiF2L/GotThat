@@ -444,7 +444,7 @@ export const StepViewer: React.FC<StepViewerProps> = React.memo(({
             <img
               src={step.visual_artifact.payload}
               alt={step.visual_artifact.alt_text || 'Educational Reference'}
-              className="w-full h-auto max-h-[260px] object-contain group-hover:scale-[1.03] transition-transform duration-500 ease-out block cursor-zoom-in"
+              className="w-full h-auto max-h-[260px] object-contain group-hover:scale-[1.03] transition-transform duration-500 ease-out block cursor-zoom-in transparent-img-contour"
               loading="lazy"
             />
           </div>

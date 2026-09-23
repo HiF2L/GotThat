@@ -15,6 +15,7 @@ from app.models.mastery import (
     UserMasteryState,
     AssessmentAttempt,
     VoiceReasoningLog,
+    ConceptReaction,
 )
 from app.models.session import (
     DeepLearningSession,
@@ -36,6 +37,7 @@ __all__ = [
     "UserMasteryState",
     "AssessmentAttempt",
     "VoiceReasoningLog",
+    "ConceptReaction",
     "DeepLearningSession",
     "DeepSessionStep",
 ]

@@ -6,6 +6,8 @@ import {
   UserMasteryOverview,
   DeepStepResult,
   DeepStep,
+  DiscoveryLessonTeaser,
+  ConceptVoteResponse,
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -37,12 +39,40 @@ export const apiClient = {
     return res.json();
   },
 
-  // 1. Quick Feed Endpoints
+  // 1. Feed Endpoints (Discovery Feed & Recall Feed)
+  async getDiscoveryFeed(userId?: string, limit: number = 20): Promise<DiscoveryLessonTeaser[]> {
+    const params = new URLSearchParams();
+    if (userId) params.append('user_id', userId);
+    params.append('limit', String(limit));
+    const res = await fetch(`${API_BASE}/feed/discovery?${params.toString()}`);
+    if (!res.ok) throw new Error('Failed to fetch discovery feed');
+    return res.json();
+  },
+
+  async voteConcept(
+    userId: string,
+    conceptId: string,
+    voteType: 'upvote' | 'downvote' | 'clear',
+  ): Promise<ConceptVoteResponse> {
+    const res = await fetch(`${API_BASE}/feed/vote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: userId,
+        concept_id: conceptId,
+        vote_type: voteType,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed to submit vote');
+    return res.json();
+  },
+
   async getNextFeedCard(userId: string): Promise<FeedCard> {
     const res = await fetch(`${API_BASE}/feed/next?user_id=${userId}`);
     if (!res.ok) throw new Error('Failed to fetch feed card');
     return res.json();
   },
+
 
   async submitQuizAttempt(
     userId: string,
@@ -97,12 +127,14 @@ export const apiClient = {
     initialContext?: string,
     language: string = 'ru',
     depthLevel?: string,
+    skipProbing: boolean = false,
   ): Promise<{ session_id: string; initial_action: any }> {
     const payload: any = {
       user_id: userId,
       target_concept_id: targetConceptId,
       initial_user_context: initialContext,
       language: language,
+      skip_probing: skipProbing,
     };
     if (depthLevel) {
       payload.depth_level = depthLevel;
@@ -271,7 +303,7 @@ export const apiClient = {
   },
 
   async getTrackMastery(trackId: string, userId: string): Promise<UserMasteryOverview> {
-    const res = await fetch(`${API_BASE}/tracks/${trackId}/mastery?user_id=${userId}`);
+    const res = await fetch(`${API_BASE}/tracks/${encodeURIComponent(trackId)}/mastery?user_id=${encodeURIComponent(userId)}`);
     if (!res.ok) throw new Error('Failed to fetch track mastery');
     return res.json();
   },
@@ -294,7 +326,20 @@ export const apiClient = {
         folder_id: folderId || undefined,
       }),
     });
-    if (!res.ok) throw new Error('Failed to generate track');
+    if (!res.ok) {
+      let errorMsg = 'Failed to generate track';
+      try {
+        const errJson = await res.json();
+        if (errJson.detail?.message) {
+          errorMsg = errJson.detail.message;
+        } else if (typeof errJson.detail === 'string') {
+          errorMsg = errJson.detail;
+        } else if (errJson.message) {
+          errorMsg = errJson.message;
+        }
+      } catch (_) {}
+      throw new Error(errorMsg);
+    }
     return res.json();
   },
 
@@ -313,7 +358,20 @@ export const apiClient = {
         user_notes: userNotes,
       }),
     });
-    if (!res.ok) throw new Error('Failed to expand track volume');
+    if (!res.ok) {
+      let errorMsg = 'Failed to expand track volume';
+      try {
+        const errJson = await res.json();
+        if (errJson.detail?.message) {
+          errorMsg = errJson.detail.message;
+        } else if (typeof errJson.detail === 'string') {
+          errorMsg = errJson.detail;
+        } else if (errJson.message) {
+          errorMsg = errJson.message;
+        }
+      } catch (_) {}
+      throw new Error(errorMsg);
+    }
     return res.json();
   },
 

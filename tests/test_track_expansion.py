@@ -175,36 +175,54 @@ async def test_track_expansion_api_endpoint():
         ],
     }
 
-    with patch("app.services.ai.client.ai_clients.generate_json", new_callable=AsyncMock) as mock_llm:
-        mock_llm.side_effect = lambda messages, **kwargs: (
-            mock_payload if any("Expand" in str(m) or "EXPAND" in str(m) or "6-20" in str(m) or "expanded" in str(m).lower() for m in messages)
-            else mock_gen_payload
-        )
+    from app.core.database import get_db_session
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-            # Create a track
-            gen_res = await ac.post("/api/v1/tracks/generate", json={
-                "user_id": "test_user_exp",
-                "topic_query": "Микросервисная архитектура",
-                "depth_level": "low",
-            })
-            assert gen_res.status_code == 200
-            track_data = gen_res.json()
-            track_id = track_data["track_id"]
-            assert track_data["depth_level"] == "low"
+    mem_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    mem_session_factory = async_sessionmaker(bind=mem_engine, class_=AsyncSession, expire_on_commit=False)
 
-            # Expand the track
-            exp_res = await ac.post(f"/api/v1/tracks/{track_id}/expand", json={
-                "user_id": "test_user_exp",
-                "depth_level": "high",
-                "user_notes": "С упором на брокеры сообщений",
-            })
-            assert exp_res.status_code == 200
-            exp_data = exp_res.json()
-            assert exp_data["track_id"] == track_id
-            assert exp_data["depth_level"] == "high"
-            assert exp_data["total_concepts"] == 4
-            assert len(exp_data["concepts"]) == 4
+    async with mem_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async def override_db():
+        async with mem_session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db_session] = override_db
+
+    try:
+        with patch("app.services.ai.client.ai_clients.generate_json", new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = lambda messages, **kwargs: (
+                mock_payload if any("Expand" in str(m) or "EXPAND" in str(m) or "6-20" in str(m) or "expanded" in str(m).lower() for m in messages)
+                else mock_gen_payload
+            )
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+                # Create a track
+                gen_res = await ac.post("/api/v1/tracks/generate", json={
+                    "user_id": "test_user_exp",
+                    "topic_query": "Микросервисная архитектура",
+                    "depth_level": "low",
+                })
+                assert gen_res.status_code == 200
+                track_data = gen_res.json()
+                track_id = track_data["track_id"]
+                assert track_data["depth_level"] == "low"
+
+                # Expand the track
+                exp_res = await ac.post(f"/api/v1/tracks/{track_id}/expand", json={
+                    "user_id": "test_user_exp",
+                    "depth_level": "high",
+                    "user_notes": "С упором на брокеры сообщений",
+                })
+                assert exp_res.status_code == 200
+                exp_data = exp_res.json()
+                assert exp_data["track_id"] == track_id
+                assert exp_data["depth_level"] == "high"
+                assert exp_data["total_concepts"] == 4
+                assert len(exp_data["concepts"]) == 4
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        await mem_engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Navigation, TabType } from './components/common/Navigation';
+import { DiscoveryFeedScreen } from './components/feed/DiscoveryFeedScreen';
 import { FeedScreen } from './components/feed/FeedScreen';
 import { DeepTutorScreen } from './components/deep/DeepTutorScreen';
 import { TracksScreen } from './components/tracks/TracksScreen';
@@ -19,6 +20,10 @@ function parseCurrentRoute(): RouteInfo {
 
   if (!segments[0] || segments[0] === 'feed') {
     return { tab: 'feed' };
+  }
+
+  if (segments[0] === 'recall') {
+    return { tab: 'recall' };
   }
 
   if (segments[0] === 'tracks') {
@@ -45,6 +50,7 @@ function parseCurrentRoute(): RouteInfo {
 
 function computePath(tab: TabType, trackId?: string | null, conceptId?: string | null): string {
   if (tab === 'feed') return '/feed';
+  if (tab === 'recall') return '/recall';
   if (tab === 'tracks') return trackId ? `/tracks/${encodeURIComponent(trackId)}` : '/tracks';
   if (tab === 'deep') return conceptId ? `/deep/${encodeURIComponent(conceptId)}` : '/deep';
   return '/feed';
@@ -56,8 +62,9 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>(initialRoute.tab);
   const [userId, setUserId] = useState<string>('demo_user');
   const [deepTargetConceptId, setDeepTargetConceptId] = useState<string | undefined>(
-    initialRoute.conceptId || undefined
+    initialRoute.conceptId || localStorage.getItem('got_it_deep_concept_id') || undefined
   );
+  const [deepSkipProbing, setDeepSkipProbing] = useState<boolean>(false);
   const [activeTrackId, setActiveTrackId] = useState<string | null>(initialRoute.trackId || null);
   const [activeConceptId, setActiveConceptId] = useState<string | null>(initialRoute.conceptId || null);
 
@@ -68,8 +75,9 @@ export const App: React.FC = () => {
 
   const [model, setModel] = useState<string>(() => {
     const saved = localStorage.getItem('got_it_model');
-    return saved || 'kimi-k3';
+    return saved || 'openai/gpt-4.1-mini';
   });
+
 
   const [ttsVoice, setTtsVoice] = useState<string>(() => {
     const saved = localStorage.getItem('got_it_tts_voice');
@@ -168,7 +176,12 @@ export const App: React.FC = () => {
       .catch((err) => console.warn('Could not auto-fetch active user:', err));
   }, []);
 
+  const [feedRefreshTrigger, setFeedRefreshTrigger] = useState<number>(0);
+
   const handleTabChange = (tab: TabType) => {
+    if (tab === 'feed' && activeTab === 'feed') {
+      setFeedRefreshTrigger((prev) => prev + 1);
+    }
     navigate(tab, undefined, undefined, false);
   };
 
@@ -193,7 +206,8 @@ export const App: React.FC = () => {
     localStorage.setItem('got_it_tts_voice', newVoice);
   };
 
-  const handleSelectConceptForDeep = (conceptId: string, trackId?: string) => {
+  const handleSelectConceptForDeep = (conceptId: string, trackId?: string, skipProbing: boolean = false) => {
+    setDeepSkipProbing(skipProbing);
     navigate('deep', trackId || activeTrackId, conceptId, false);
   };
 
@@ -288,9 +302,22 @@ export const App: React.FC = () => {
 
       {/* Main Content Area - Persistent Tabs (Keeps State in Memory) */}
       <main className="flex-1 flex flex-col w-full">
+        {/* Discovery Feed: Curated Lesson Teasers & Direct Deep Tutor Bridges */}
         <div className={activeTab === 'feed' ? 'flex-1 flex flex-col w-full' : 'hidden'}>
+          <DiscoveryFeedScreen
+            userId={userId}
+            isActive={activeTab === 'feed'}
+            feedRefreshTrigger={feedRefreshTrigger}
+            onOpenLesson={handleSelectConceptForDeep}
+            onOpenTrack={(trackIdentifier) => navigate('tracks', trackIdentifier, undefined, false)}
+          />
+        </div>
+
+        {/* Recall Feed: Spaced Repetition SRS Quizzes & Spoken Reasoning */}
+        <div className={activeTab === 'recall' ? 'flex-1 flex flex-col w-full' : 'hidden'}>
           <FeedScreen userId={userId} />
         </div>
+
 
         <div className={activeTab === 'deep' ? 'flex-1 flex flex-col w-full' : 'hidden'}>
           <DeepTutorScreen
@@ -300,6 +327,7 @@ export const App: React.FC = () => {
             language={language}
             currentModel={model}
             ttsVoice={ttsVoice}
+            skipProbing={deepSkipProbing}
             onActiveConceptChange={handleActiveConceptChange}
             onNavigateToFeed={() => handleTabChange('feed')}
             onNavigateToMap={() => handleTabChange('tracks')}

@@ -13,6 +13,7 @@ router = APIRouter(prefix="/tracks", tags=["Tracks & Ontology"])
 
 from pydantic import BaseModel
 from app.services.graph.dynamic_curriculum import curriculum_generator
+from app.services.moderation import moderation_service
 from app.models.ontology import Domain, Track, Concept, TrackFolder
 from sqlalchemy import func, update, or_
 
@@ -229,6 +230,12 @@ async def generate_custom_track(
     On-demand AI Curriculum Generation: Creates a complete knowledge graph track
     for ANY user topic (Physics, Philosophy, Coding, History, etc.)
     """
+    # 0. Safety & Content Moderation Audit
+    await moderation_service.validate_course_request_or_raise(
+        topic_query=request.topic_query,
+        user_wishes=request.user_wishes,
+    )
+
     track = await curriculum_generator.generate_curriculum(
         session=db,
         user_id=request.user_id,
@@ -284,6 +291,12 @@ async def expand_custom_track(
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
 
+    if request.user_notes and request.user_notes.strip():
+        await moderation_service.validate_or_raise(
+            text=request.user_notes,
+            context={"intent": "track_expansion_notes", "topic": track.title},
+        )
+
     dag_plan = await plan_manager.expand_track_curriculum(
         session=db,
         user_id=request.user_id,
@@ -321,6 +334,7 @@ from typing import List, Optional
 from fastapi import Query
 
 
+@router.get("")
 @router.get("/")
 @router.get("/list")
 async def list_available_tracks(db: AsyncSession = Depends(get_db_session)):

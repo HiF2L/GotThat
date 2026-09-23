@@ -184,13 +184,25 @@ class TutorStateMachine:
 
         # B. If advancing after completing a step at current_index
         if active_idx is None and is_advancing and current_index is not None:
+            # 1. Forward scan: check concepts from current_index + 1 to the end
             scan_idx = current_index + 1
             while scan_idx < len(nodes) and scan_idx in completed_indices:
                 scan_idx += 1
             if scan_idx < len(nodes):
                 active_idx = scan_idx
             else:
-                active_idx = len(nodes)
+                # 2. Cyclic wrap-around scan: search from the beginning (0 .. current_index) for any unmastered concept
+                wrap_idx = 0
+                while wrap_idx <= current_index and wrap_idx < len(nodes):
+                    if wrap_idx not in completed_indices:
+                        active_idx = wrap_idx
+                        break
+                    wrap_idx += 1
+
+                # 3. If every single node across the entire course is mastered, mark all completed
+                if active_idx is None:
+                    active_idx = len(nodes)
+
 
         # C. If a current_index is already set and not advancing, RESPECT the current index
         if active_idx is None and not is_advancing and current_index is not None and 0 <= current_index < len(nodes):
@@ -325,6 +337,7 @@ class TutorStateMachine:
                 track_depth = track_obj.depth_level
         session_depth = (request.depth_level if request.depth_level else None) or track_depth or "high"
 
+        # 3a. If user already has a planned DAG session, resume it
         if existing_session and existing_session.planned_dag:
             if request.language:
                 existing_session.language = request.language
@@ -354,6 +367,17 @@ class TutorStateMachine:
             else:
                 existing_session.status = "teaching"
 
+            await session.commit()
+            return existing_session
+
+        # 3b. Resuming an ongoing diagnostic probing session on page reload (F5) without losing questions/answers
+        if existing_session and existing_session.status == "probing" and not getattr(request, "skip_probing", False):
+            if request.language:
+                existing_session.language = request.language
+            if request.depth_level:
+                existing_session.depth_level = request.depth_level
+            elif track_depth:
+                existing_session.depth_level = track_depth
             await session.commit()
             return existing_session
 
@@ -392,7 +416,62 @@ class TutorStateMachine:
             await session.commit()
             return deep_session
 
-        # 5. If track is brand new and uncompiled (<= 1 concept), create a new diagnostic session
+        # 5. Direct Start (User chose "Сразу к первому уроку без теста"): synthesize tailored course DAG immediately
+        if getattr(request, "skip_probing", False):
+            target_track_obj = None
+            if target_concept and target_concept.track_id:
+                t_res = await session.execute(select(Track).where(Track.id == target_concept.track_id))
+                target_track_obj = t_res.scalars().first()
+
+            track_wishes = target_track_obj.user_wishes if target_track_obj else None
+            combined_notes_parts = []
+            if track_wishes:
+                combined_notes_parts.append(f"Student Course Wishes / Focus: {track_wishes}")
+            if request.initial_user_context and request.initial_user_context.strip():
+                combined_notes_parts.append(f"Student Context: {request.initial_user_context.strip()}")
+            effective_context_notes = "\n".join(combined_notes_parts)
+
+            planned_dag = await plan_manager.generate_and_verify_plan(
+                session=session,
+                user_id=user_id,
+                target_concept_id=target_concept_id,
+                user_context_notes=effective_context_notes,
+                probing_transcript=None,  # Clean start without probe skips
+                language=session_lang,
+                depth_level=session_depth,
+            )
+
+            reconciled_dag, active_idx, active_cid, is_all_completed = await self.reconcile_dag_with_mastery(
+                session=session,
+                user_id=user_id,
+                dag_data=planned_dag.model_dump(),
+                requested_concept_id=specific_concept_id if not is_track_level_request else None,
+                current_index=None,
+            )
+
+            deep_session = existing_session or DeepLearningSession(
+                user_id=user_id,
+                target_concept_id=target_concept_id,
+            )
+            deep_session.status = "completed" if is_all_completed else "teaching"
+            deep_session.language = session_lang
+            deep_session.depth_level = session_depth
+            deep_session.planned_dag = reconciled_dag
+            flag_modified(deep_session, "planned_dag")
+            deep_session.mermaid_diagram = reconciled_dag.get("mermaid_code", "")
+            deep_session.current_concept_index = active_idx
+            deep_session.current_concept_id = active_cid or (reconciled_dag["nodes"][0]["id"] if reconciled_dag.get("nodes") else target_concept_id)
+            deep_session.probing_state = {"probed_nodes": [], "answers": {}, "transcript": [], "suite": []}
+            if is_all_completed and not deep_session.completed_at:
+                deep_session.completed_at = datetime.utcnow()
+
+            if not existing_session:
+                session.add(deep_session)
+
+            await session.commit()
+            return deep_session
+
+        # 6. If track is brand new and uncompiled (<= 1 concept) and user wants diagnostic test:
         deep_session = DeepLearningSession(
             user_id=user_id,
             target_concept_id=target_concept_id,
@@ -415,6 +494,7 @@ class TutorStateMachine:
         # Pre-initialize diagnostic suite
         await probe_manager.initialize_suite_if_needed(session, deep_session)
         return deep_session
+
 
     async def record_probe_answer(
         self,

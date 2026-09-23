@@ -302,8 +302,8 @@ class TTSService:
                     last_err = e
                     logger.warning(f"Edge-TTS synthesis error: {e}. Falling back to ProxyAPI...")
 
-            # 2. Fallback: ProxyAPI OpenAI-compatible endpoint
-            if not chunk_success:
+            # 2. Fallback: Only if cloud/paid TTS is explicitly configured (never when TTS_ENGINE is 'edge' or 'local')
+            if not chunk_success and getattr(settings, "TTS_ENGINE", "edge") in ("cloud", "openai", "proxyapi"):
                 openai_voice = "alloy"
                 for o_name in ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]:
                     if o_name in (voice or "").lower():

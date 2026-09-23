@@ -81,3 +81,5 @@ class StartDeepSessionRequest(BaseModel):
     initial_user_context: Optional[str] = None # e.g. "I already know basic vector calculus"
     language: Optional[str] = "ru"
     depth_level: Optional[str] = None
+    skip_probing: Optional[bool] = False
+

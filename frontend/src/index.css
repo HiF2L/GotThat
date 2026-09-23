@@ -265,10 +265,6 @@ code, pre {
   color: #cbd5e1;
 }
 
-.markdown-content figure {
-  clear: both;
-}
-
 .markdown-content figure img {
   display: block;
   width: 100%;
@@ -288,8 +284,49 @@ code, pre {
   object-fit: contain;
   border-radius: 0.75rem;
   margin: 1.25rem auto;
-  background: #020617;
+  background: transparent !important;
   border: 1px solid #1e293b;
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
   cursor: zoom-in;
 }
+
+/* Thin, delicate outline for transparent graphics/diagrams across Deep Tutor & Feed */
+.transparent-img-contour,
+.markdown-content img,
+.markdown-content figure img {
+  filter: drop-shadow(0.5px 0 0 rgba(255, 255, 255, 0.5))
+          drop-shadow(-0.5px 0 0 rgba(255, 255, 255, 0.5))
+          drop-shadow(0 0.5px 0 rgba(255, 255, 255, 0.5))
+          drop-shadow(0 -0.5px 0 rgba(255, 255, 255, 0.5));
+}
+
+/* Discovery Feed: Float image to the side so text wraps alongside, matching Deep Tutor */
+.feed-markdown figure {
+  float: right !important;
+  clear: right !important;
+  width: 220px !important;
+  max-width: 42% !important;
+  margin: 0.25rem 0 0.75rem 1.25rem !important;
+  border-radius: 1rem !important;
+}
+
+.feed-markdown figure > div {
+  min-height: 80px !important;
+  max-height: 180px !important;
+}
+
+.feed-markdown figure img {
+  max-height: 180px !important;
+  object-fit: contain !important;
+}
+
+@media (max-width: 640px) {
+  .feed-markdown figure {
+    float: none !important;
+    clear: both !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0.75rem 0 !important;
+  }
+}
+

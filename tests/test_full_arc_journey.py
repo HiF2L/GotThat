@@ -1,13 +1,16 @@
 import pytest
 from unittest.mock import AsyncMock, patch
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from app.core.database import Base
 from app.models.ontology import Domain, Track, Concept, ConceptDependency, DependencyType
-from app.models.mastery import User
+from app.models.mastery import User, UserMasteryState
+from app.models.session import DeepLearningSession, DeepSessionStep
+
 from app.schemas.tutor import StartDeepSessionRequest, DeepStepAnswerSubmission
 from app.services.tutor.tutor_state_machine import tutor_state_machine
 from app.services.tutor.step_executor import step_executor
+from app.services.ai.client import ai_clients
 
 
 @pytest.mark.asyncio
@@ -48,7 +51,7 @@ async def test_continuous_multi_concept_arc():
     }
 
     mock_teach_payload = {
-        "explanation_markdown": "### Intuition & First Principles\n\nCalculus formalizes dynamic systems and change through rigorous limits.",
+        "explanation_markdown": "### Intuition & First Principles\n\nCalculus formalizes dynamic systems and change through rigorous infinitesimal limits and accumulation of continuous quantities.",
         "needs_visual_diagram": False,
         "needs_real_image": False,
         "verification_question": {
@@ -58,18 +61,45 @@ async def test_continuous_multi_concept_arc():
                 {"id": "b", "text": "Total accumulated area", "is_correct": False, "explanation": "Incorrect."},
             ],
         },
+        "options": [
+            {"id": "a", "text": "Instantaneous rate of change as limit approaches 0", "is_correct": True, "explanation": "Correct."},
+            {"id": "b", "text": "Total accumulated area", "is_correct": False, "explanation": "Incorrect."},
+        ],
     }
 
-    with patch("app.services.ai.client.ai_clients.generate_json", new_callable=AsyncMock) as mock_json, \
+    with patch.object(ai_clients, "generate_json", new_callable=AsyncMock) as mock_json, \
+         patch.object(ai_clients, "generate_chat", new_callable=AsyncMock) as mock_chat, \
          patch("app.services.ai.visualizer.visualizer.generate_visualization", new_callable=AsyncMock) as mock_vis, \
          patch("app.services.ai.fact_checker.fact_checker.verify_concept_explanation", new_callable=AsyncMock) as mock_fc, \
          patch("app.services.ai.image_finder.image_finder.find_educational_image", new_callable=AsyncMock) as mock_img:
 
-        mock_json.side_effect = lambda messages, **kwargs: (
-            mock_probe_payload if any("DIAGNOSTIC" in str(m) or "Diagnostic" in str(m) or "questions" in str(m) for m in messages)
-            else mock_plan_payload if any("Curriculum" in str(m) or "DAG" in str(m) for m in messages)
-            else mock_teach_payload
-        )
+        def _extract_messages(*args, **kwargs):
+            if "messages" in kwargs:
+                return kwargs["messages"]
+            for a in args:
+                if isinstance(a, list):
+                    return a
+            return []
+
+        def _mock_chat_dispatcher(*args, **kwargs):
+            messages = _extract_messages(*args, **kwargs)
+            combined = " ".join(str(m.get("content", "")) for m in messages if isinstance(m, dict))
+            if "Moderation" in combined or "Safety" in combined or "Classify" in combined:
+                return "ALLOWED"
+            return "### Intuition & First Principles\n\nCalculus formalizes dynamic systems and change through rigorous infinitesimal limits and accumulation of continuous quantities over continuous intervals."
+
+        def _mock_json_dispatcher(*args, **kwargs):
+            messages = _extract_messages(*args, **kwargs)
+            combined = " ".join(str(m.get("content", "")) for m in messages if isinstance(m, dict))
+            if "technical examiner" in combined or "diagnostic interview" in combined.lower() or "DIAGNOSTIC INTERVIEW" in combined:
+                return mock_probe_payload
+            elif "curriculum architect" in combined or "Zero-to-Mastery Course" in combined:
+                return mock_plan_payload
+            else:
+                return mock_teach_payload
+
+        mock_chat.side_effect = _mock_chat_dispatcher
+        mock_json.side_effect = _mock_json_dispatcher
         mock_vis.return_value = None
         mock_fc.return_value = None
         mock_img.return_value = None
@@ -168,13 +198,37 @@ async def test_continuous_multi_concept_arc():
             assert len(action_step3["step"].concept_title) > 0
 
             # 8. Fast-forward to the terminal step to test full arc completion
+            for node in dag.nodes:
+                cid = str(node.id)
+                res = await session.execute(
+                    select(UserMasteryState).where(
+                        and_(
+                            UserMasteryState.user_id == user.id,
+                            UserMasteryState.concept_id == cid,
+                        )
+                    )
+                )
+                ms = res.scalar_one_or_none()
+                if not ms:
+                    ms = UserMasteryState(
+                        user_id=user.id,
+                        concept_id=cid,
+                        mastery_prob=0.95,
+                        uncertainty=0.1,
+                    )
+                    session.add(ms)
+                else:
+                    ms.mastery_prob = 0.95
+                    ms.uncertainty = 0.1
+            await session.commit()
+
             deep_session.current_concept_index = len(dag.nodes) - 1
             await session.commit()
 
             action_terminal = await tutor_state_machine.get_next_action(session=session, deep_session_id=deep_session.id)
             assert action_terminal["phase"] == "step_ready"
 
-            await step_executor.evaluate_step_answer(
+            res_term = await step_executor.evaluate_step_answer(
                 session=session,
                 deep_session=deep_session,
                 submission=DeepStepAnswerSubmission(
@@ -183,6 +237,7 @@ async def test_continuous_multi_concept_arc():
                     selected_option_ids=["a"],
                 ),
             )
+            assert res_term.is_correct is True
             await tutor_state_machine.advance_to_next_node(session, deep_session.id)
 
             # 9. Arc is now complete!
