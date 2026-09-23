@@ -77,7 +77,7 @@ export const App: React.FC = () => {
 
   const [model, setModel] = useState<string>(() => {
     const saved = localStorage.getItem('got_it_model');
-    return saved || 'openai/gpt-4.1-mini';
+    return saved || 'deepseek/deepseek-v4-pro';
   });
 
 

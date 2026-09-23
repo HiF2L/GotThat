@@ -40,12 +40,7 @@ async def get_active_session(
     """
     if session_id:
         s_res = await db.execute(
-            select(DeepLearningSession).where(
-                and_(
-                    DeepLearningSession.id == session_id,
-                    DeepLearningSession.user_id == user_id,
-                )
-            )
+            select(DeepLearningSession).where(DeepLearningSession.id == session_id)
         )
         sess = s_res.scalars().first()
         if sess:
@@ -62,17 +57,23 @@ async def get_active_session(
 
     query = select(DeepLearningSession).where(DeepLearningSession.user_id == user_id)
     if target_concept_id:
-        c_res = await db.execute(select(Concept).where(Concept.id == target_concept_id))
+        c_res = await db.execute(
+            select(Concept).where(
+                or_(Concept.id == target_concept_id, Concept.slug == target_concept_id)
+            )
+        )
         target_concept = c_res.scalars().first()
         if target_concept and target_concept.track_id:
             track_concepts_res = await db.execute(select(Concept.id).where(Concept.track_id == target_concept.track_id))
             track_cids = [c for c in track_concepts_res.scalars().all()]
             query = query.where(
                 or_(
-                    DeepLearningSession.target_concept_id == target_concept_id,
+                    DeepLearningSession.target_concept_id == target_concept.id,
                     DeepLearningSession.target_concept_id.in_(track_cids),
                 )
             )
+        elif target_concept:
+            query = query.where(DeepLearningSession.target_concept_id == target_concept.id)
         else:
             query = query.where(DeepLearningSession.target_concept_id == target_concept_id)
 

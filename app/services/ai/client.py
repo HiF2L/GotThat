@@ -122,8 +122,8 @@ def strip_reasoning_tags(text: str) -> str:
 
 class ReasoningStreamFilter:
     """
-    Streaming state machine that buffers and eliminates reasoning/thinking blocks on the fly
-    (<think>...</think>, <thought>...</thought>, <reasoning>...</reasoning>).
+    Streaming state machine that processes tokens and separates model reasoning/thinking
+    (<think>...</think>, <thought>...</thought>, <reasoning>...</reasoning>) from pedagogical content on the fly.
     Properly handles tag boundaries split across token chunks without swallowing pedagogical text.
     """
 
@@ -133,29 +133,33 @@ class ReasoningStreamFilter:
         self.current_tag: Optional[str] = None
         self.buffer = ""
 
-    def process_chunk(self, chunk: str) -> str:
+    def process_chunk_events(self, chunk: str) -> List[Any]:
+        """
+        Processes streaming token chunk and yields a list of (event_type, token_str) tuples,
+        where event_type is either 'thought' or 'content'.
+        """
         if not chunk:
-            return ""
+            return []
 
         self.buffer += chunk
-        output: List[str] = []
+        events: List[Any] = []
 
         while self.buffer:
             if not self.in_reasoning:
                 open_pos = self.buffer.find("<")
                 if open_pos == -1:
-                    output.append(self.buffer)
+                    events.append(("content", self.buffer))
                     self.buffer = ""
                     break
                 else:
                     if open_pos > 0:
-                        output.append(self.buffer[:open_pos])
+                        events.append(("content", self.buffer[:open_pos]))
                         self.buffer = self.buffer[open_pos:]
 
                     close_angle = self.buffer.find(">")
                     if close_angle == -1:
                         if len(self.buffer) > 30:
-                            output.append(self.buffer[0])
+                            events.append(("content", self.buffer[0]))
                             self.buffer = self.buffer[1:]
                         else:
                             break
@@ -172,40 +176,54 @@ class ReasoningStreamFilter:
                             self.current_tag = matched_tag
                             self.buffer = self.buffer[close_angle + 1:]
                         else:
-                            output.append(self.buffer[:close_angle + 1])
+                            events.append(("content", self.buffer[:close_angle + 1]))
                             self.buffer = self.buffer[close_angle + 1:]
             else:
                 close_marker = f"</{self.current_tag}>"
                 close_pos = self.buffer.lower().find(close_marker)
                 if close_pos != -1:
+                    thought_content = self.buffer[:close_pos]
+                    if thought_content:
+                        events.append(("thought", thought_content))
                     self.buffer = self.buffer[close_pos + len(close_marker):]
                     self.in_reasoning = False
                     self.current_tag = None
                 else:
                     lower_buf = self.buffer.lower()
-                    partial = False
-                    for i in range(1, len(close_marker)):
+                    partial_len = 0
+                    for i in range(len(close_marker) - 1, 0, -1):
                         if lower_buf.endswith(close_marker[:i]):
-                            partial = True
+                            partial_len = i
                             break
-                    if partial:
-                        for i in range(1, len(close_marker)):
-                            if lower_buf.endswith(close_marker[:i]):
-                                self.buffer = self.buffer[-i:]
-                                break
+                    if partial_len > 0:
+                        thought_content = self.buffer[:-partial_len]
+                        if thought_content:
+                            events.append(("thought", thought_content))
+                        self.buffer = self.buffer[-partial_len:]
                     else:
+                        events.append(("thought", self.buffer))
                         self.buffer = ""
                     break
 
-        return "".join(output)
+        return events
+
+    def flush_events(self) -> List[Any]:
+        if not self.buffer:
+            return []
+        ev_type = "thought" if self.in_reasoning else "content"
+        res = [(ev_type, self.buffer)]
+        self.buffer = ""
+        self.in_reasoning = False
+        self.current_tag = None
+        return res
+
+    def process_chunk(self, chunk: str) -> str:
+        events = self.process_chunk_events(chunk)
+        return "".join(token for ev_type, token in events if ev_type == "content")
 
     def flush(self) -> str:
-        if not self.in_reasoning and self.buffer:
-            res = self.buffer
-            self.buffer = ""
-            return res
-        self.buffer = ""
-        return ""
+        events = self.flush_events()
+        return "".join(token for ev_type, token in events if ev_type == "content")
 
 
 def sanitize_markdown_text(text: str) -> str:
@@ -241,6 +259,22 @@ def sanitize_markdown_text(text: str) -> str:
 
     # Clean once more in case stripped json had reasoning tags inside
     cleaned = strip_reasoning_tags(cleaned)
+
+    # Strip conversational meta-preamble before the first markdown header
+    # e.g. "Okay, I understand...", "Here is the tutorial:", "Plan: 1. ...", etc.
+    h_match = re.search(r'(?m)^#{1,3}\s+[^\n]+', cleaned)
+    if h_match and h_match.start() > 0:
+        preamble = cleaned[:h_match.start()].strip()
+        is_meta = False
+        if len(preamble.splitlines()) > 1:
+            is_meta = True
+        elif re.search(r'\b(okay|here|let|draft|plan|user|student|tutorial|certainly|sure|below|конечно|вот|я |подготов|начнем|разберем|вводная)\b', preamble, re.IGNORECASE):
+            is_meta = True
+        elif any(c in preamble for c in [":", "...", "—"]) and len(preamble) < 300:
+            is_meta = True
+
+        if is_meta:
+            cleaned = cleaned[h_match.start():].strip()
 
     return cleaned
 
@@ -577,18 +611,19 @@ class AIClientManager:
             )
             raise RuntimeError(f"AI generation failed for model '{chosen_model}': {e}")
 
-    async def generate_chat_stream(
+    async def generate_chat_stream_events(
         self,
         messages: List[Dict[str, str]],
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: Optional[int] = None,
         task_type: str = "step_stream",
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[Dict[str, str], None]:
         """
-        Server-Sent Events / Chunked streaming method.
-        Keeps HTTP connection continuously active, eliminating timeouts.
-        Captures full usage statistics from the final chunk and logs to AICostTracker.
+        Unified SSE streaming method that yields typed event objects:
+        - {"type": "thought", "token": "..."}: real-time thinking tokens from reasoning_content or <think> tags.
+        - {"type": "content", "token": "..."}: tutorial prose markdown tokens.
+        Eliminates timeouts and records full metrics to AICostTracker.
         """
         raw_model = model or settings.FAST_MODEL
         chosen_model = self.normalize_model_name(raw_model)
@@ -615,16 +650,25 @@ class AIClientManager:
             async for chunk in response_stream:
                 choices = getattr(chunk, "choices", [])
                 if choices and choices[0].delta:
-                    delta_content = getattr(choices[0].delta, "content", None)
+                    delta = choices[0].delta
+                    # 1. Native reasoning_content delta (DeepSeek-R1, Moonshot Kimi K3, OpenAI o1/o3)
+                    if hasattr(delta, "reasoning_content") and getattr(delta, "reasoning_content", None):
+                        r_text = str(delta.reasoning_content)
+                        if r_text:
+                            reasoning_tokens += max(1, len(r_text) // 4)
+                            yield {"type": "thought", "token": r_text}
+
+                    # 2. Content delta (may contain inline <think> tags)
+                    delta_content = getattr(delta, "content", None)
                     if delta_content:
                         total_chars += len(delta_content)
-                        filtered_text = stream_filter.process_chunk(delta_content)
-                        if filtered_text:
-                            yield filtered_text
-                    elif hasattr(choices[0].delta, "reasoning_content") and getattr(choices[0].delta, "reasoning_content", None):
-                        # Account for reasoning token volume in metrics, but do NOT yield internal model thoughts as lesson text
-                        r_text = str(choices[0].delta.reasoning_content)
-                        reasoning_tokens += max(1, len(r_text) // 4)
+                        for ev_type, ev_token in stream_filter.process_chunk_events(delta_content):
+                            if ev_token:
+                                if ev_type == "thought":
+                                    reasoning_tokens += max(1, len(ev_token) // 4)
+                                    yield {"type": "thought", "token": ev_token}
+                                else:
+                                    yield {"type": "content", "token": ev_token}
 
                 if hasattr(chunk, "usage") and chunk.usage:
                     u = chunk.usage
@@ -633,9 +677,12 @@ class AIClientManager:
                     if hasattr(u, "completion_tokens_details") and getattr(u, "completion_tokens_details", None):
                         reasoning_tokens = _safe_int(getattr(u.completion_tokens_details, "reasoning_tokens", 0) or 0)
 
-            remaining = stream_filter.flush()
-            if remaining:
-                yield remaining
+            for ev_type, ev_token in stream_filter.flush_events():
+                if ev_token:
+                    if ev_type == "thought":
+                        yield {"type": "thought", "token": ev_token}
+                    else:
+                        yield {"type": "content", "token": ev_token}
 
         except Exception as e:
             status = "error"
@@ -659,6 +706,28 @@ class AIClientManager:
                 status=status,
                 error_message=error_msg,
             )
+
+    async def generate_chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: float = 0.3,
+        max_tokens: Optional[int] = None,
+        task_type: str = "step_stream",
+    ) -> AsyncGenerator[str, None]:
+        """
+        Convenience generator yielding tutorial prose tokens only (filtering out thoughts).
+        Backwards-compatible with plan_phase and other consumers.
+        """
+        async for ev in self.generate_chat_stream_events(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            task_type=task_type,
+        ):
+            if ev["type"] == "content":
+                yield ev["token"]
 
     async def generate_json(
         self,

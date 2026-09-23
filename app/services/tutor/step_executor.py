@@ -1362,7 +1362,8 @@ class StepExecutor:
         system_prompt = (
             "You are an elite, world-class personal mentor and master educator.\n"
             "Generate an exhaustive, deeply intuitive, storytelling-driven atomic tutorial.\n"
-            "Format the entire tutorial directly in clean, rich Markdown (headings, bold, lists, LaTeX $$ formulas, code blocks).\n\n"
+            "Format the entire tutorial directly in clean, rich Markdown (headings, bold, lists, LaTeX $$ formulas, code blocks).\n"
+            "CRITICAL: Start DIRECTLY with the top-level title header: \"# <Concept Title>\". Do NOT include any introductory conversational remarks, meta-commentary, or self-reflection before the title.\n\n"
             "At the very end of your response, after the entire tutorial text, output:\n"
             "---QUIZ_JSON---\n"
             "followed by a single JSON object testing comprehension:\n"
@@ -1389,12 +1390,17 @@ class StepExecutor:
         quiz_buffer_parts: List[str] = []
         in_quiz_section = False
 
-        async for chunk in ai_clients.generate_chat_stream(
+        async for ev in ai_clients.generate_chat_stream_events(
             messages=messages,
             model=active_model,
             temperature=0.25,
             task_type="step_stream",
         ):
+            if ev.get("type") == "thought":
+                yield {"type": "thought", "token": ev.get("token", "")}
+                continue
+
+            chunk = ev.get("token", "")
             if "---QUIZ_JSON---" in chunk or "---QUIZ" in chunk:
                 in_quiz_section = True
                 split_parts = chunk.split("---QUIZ", 1)
@@ -1450,7 +1456,7 @@ class StepExecutor:
             allow_voice=True,
         )
 
-        # Save to DB
+        # Save step to DB
         new_step = DeepSessionStep(
             session_id=deep_session.id,
             concept_id=concept.id,
@@ -1464,9 +1470,19 @@ class StepExecutor:
             verification_passed=False,
         )
         session.add(new_step)
+
+        # Synchronize active session pointer so page reloads immediately resolve this lesson
+        deep_session.current_concept_id = concept.id
+        deep_session.current_concept_index = step_sequence - 1
+        if deep_session.planned_dag and deep_session.planned_dag.get("nodes"):
+            for n in deep_session.planned_dag["nodes"]:
+                if n.get("id") == concept.id or n.get("concept_id") == concept.id:
+                    n["status"] = "active"
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(deep_session, "planned_dag")
+
         await session.commit()
         await session.refresh(new_step)
-
 
         payload = self._build_step_payload_from_db(new_step, concept, deep_session, step_sequence)
         from app.services.ai.tts_service import tts_service

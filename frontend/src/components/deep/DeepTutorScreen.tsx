@@ -23,6 +23,9 @@ import {
   Map,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Brain,
   Network,
   X,
   Layers,
@@ -47,7 +50,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   targetConceptId,
   isActive = true,
   language = 'ru',
-  currentModel = 'kimi-k3',
+  currentModel = 'deepseek/deepseek-v4-pro',
   ttsVoice = 'alloy',
   skipProbing = false,
   onNavigateToFeed,
@@ -55,9 +58,9 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   onActiveConceptChange,
 }) => {
   const activeModelMeta = AVAILABLE_AI_MODELS.find(
-    (m) => m.id.toLowerCase() === (currentModel || 'kimi-k3').toLowerCase()
+    (m) => m.id.toLowerCase() === (currentModel || 'deepseek/deepseek-v4-pro').toLowerCase()
   );
-  const activeModelDisplayName = activeModelMeta ? activeModelMeta.name : (currentModel || 'Kimi K3');
+  const activeModelDisplayName = activeModelMeta ? activeModelMeta.name : (currentModel || 'DeepSeek V4 Pro');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentPhase, setCurrentPhase] = useState<string>('idle'); // idle, probing, planning, teaching, completed
   const [dagPlan, setDagPlan] = useState<PlannedDAG | null>(null);
@@ -71,19 +74,26 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   const [isTranscribingAudio, setIsTranscribingAudio] = useState<boolean>(false);
   const [selectedProbeOptionId, setSelectedProbeOptionId] = useState<string | null>(null);
   const [loadingProgress, setLoadingProgress] = useState<number>(15);
-  const [loadingTimeLeft, setLoadingTimeLeft] = useState<number>(8);
   const [streamingContent, setStreamingContent] = useState<string>('');
+  const [streamingThoughts, setStreamingThoughts] = useState<string>('');
+  const [isThinkingOpen, setIsThinkingOpen] = useState<boolean>(true);
+  const [streamingLessonTitle, setStreamingLessonTitle] = useState<string>('');
   const [planningLogs, setPlanningLogs] = useState<string[]>([]);
+  const thoughtsScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (thoughtsScrollRef.current) {
+      thoughtsScrollRef.current.scrollTop = thoughtsScrollRef.current.scrollHeight;
+    }
+  }, [streamingThoughts]);
 
   useEffect(() => {
     if (!loading) {
       setLoadingProgress(15);
-      setLoadingTimeLeft(8);
       return;
     }
     const timer = setInterval(() => {
       setLoadingProgress((prev) => (prev < 90 ? prev + Math.floor(Math.random() * 8) + 4 : Math.min(prev + 1, 95)));
-      setLoadingTimeLeft((prev) => (prev > 1 ? prev - 1 : 1));
     }, 1000);
     return () => clearInterval(timer);
   }, [loading]);
@@ -123,6 +133,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setDagPlan(null);
     setLoading(true);
     setStreamingContent('');
+    setStreamingThoughts('');
     setPlanningLogs([]);
 
     try {
@@ -156,8 +167,16 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
                 onActiveConceptChange(cachedStep.concept_id, cachedStep.track_slug || cachedStep.track_id);
               }
               setLoading(false);
+              setStreamingContent('');
+              setStreamingThoughts('');
               isStartingSessionRef.current = false;
               apiClient.prefetchPipeline(activeSess.session_id, cachedStep.concept_id, cachedStep.step_sequence);
+              return;
+            } else {
+              // Existing session is already in teaching phase, but target lesson needs generation.
+              // Stream this step directly in the active session instead of re-planning the entire course from scratch!
+              isStartingSessionRef.current = false;
+              await handleSelectConceptNode(targetCid, activeSess.session_id, activeSess.planned_dag, true);
               return;
             }
           }
@@ -187,7 +206,12 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             },
             onLessonStart: (l) => {
               setLoadingMessage(`Синтез урока: ${l.title}...`);
+              setStreamingLessonTitle(l.title);
               setStreamingContent('');
+              setStreamingThoughts('');
+            },
+            onThought: (tok) => {
+              setStreamingThoughts((prev) => prev + tok);
             },
             onToken: (tok) => {
               setStreamingContent((prev) => prev + tok);
@@ -200,6 +224,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               }
               setLoading(false);
               setStreamingContent('');
+              setStreamingThoughts('');
             },
             onProbing: (action) => {
               handleTutorActionResponse(action);
@@ -252,12 +277,24 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     if (!force && (loading || isNavigatingRef.current)) return;
     isNavigatingRef.current = true;
     loadedTargetRef.current = conceptId;
+
+    // Immediately synchronize URL and state in parent container
+    if (onActiveConceptChange) {
+      onActiveConceptChange(conceptId);
+    }
+
+    const currentDag = overrideDag || dagPlan;
+    const targetNode = currentDag?.nodes?.find((n) => n.id === conceptId || n.slug === conceptId);
+    if (targetNode?.title) {
+      setStreamingLessonTitle(targetNode.title);
+    }
+
     setLoading(true);
     setStreamingContent('');
+    setStreamingThoughts('');
     setLoadingMessage('Синтез урока в реальном времени...');
 
     const currentSid = activeSessionId || sessionId || localStorage.getItem('got_it_active_session_id');
-    const currentDag = overrideDag || dagPlan;
 
     try {
       // 0. Fast-path check: Is this lesson already cached in SQLite?
@@ -272,6 +309,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
           }
           setLoading(false);
           setStreamingContent('');
+          setStreamingThoughts('');
           isNavigatingRef.current = false;
           apiClient.prefetchPipeline(currentSid, cachedStep.concept_id, cachedStep.step_sequence);
           return;
@@ -284,28 +322,37 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             currentSid,
             conceptId,
             yapNote,
-            (token) => {
-              setStreamingContent((prev) => prev + token);
-            },
-            (step) => {
-              setCurrentStep(step);
-              const activeConceptKey = step.concept_id;
-              loadedTargetRef.current = activeConceptKey;
-              if (onActiveConceptChange) {
-                onActiveConceptChange(
-                  activeConceptKey,
-                  step.track_slug || step.track_id
-                );
-              }
-              setLoading(false);
-              setStreamingContent('');
-              apiClient.prefetchPipeline(currentSid, step.concept_id, step.step_sequence);
-            },
-            (err) => {
-              console.warn('Streaming step fallback to selectStep:', err);
-              apiClient.selectStep(currentSid, conceptId, yapNote).then((action) => {
-                handleTutorActionResponse(action, currentSid);
-              });
+            {
+              onThought: (tok) => {
+                setStreamingThoughts((prev) => prev + tok);
+              },
+              onStatus: (msg) => {
+                setLoadingMessage(msg);
+              },
+              onToken: (tok) => {
+                setStreamingContent((prev) => prev + tok);
+              },
+              onReady: (step) => {
+                setCurrentStep(step);
+                const activeConceptKey = step.concept_id;
+                loadedTargetRef.current = activeConceptKey;
+                if (onActiveConceptChange) {
+                  onActiveConceptChange(
+                    activeConceptKey,
+                    step.track_slug || step.track_id
+                  );
+                }
+                setLoading(false);
+                setStreamingContent('');
+                setStreamingThoughts('');
+                apiClient.prefetchPipeline(currentSid, step.concept_id, step.step_sequence);
+              },
+              onError: (err) => {
+                console.warn('Streaming step fallback to selectStep:', err);
+                apiClient.selectStep(currentSid, conceptId, yapNote).then((action) => {
+                  handleTutorActionResponse(action, currentSid);
+                });
+              },
             }
           );
           return;
@@ -325,6 +372,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       console.error('Failed to switch concept:', err);
       setLoading(false);
       setStreamingContent('');
+      setStreamingThoughts('');
     } finally {
       isNavigatingRef.current = false;
     }
@@ -770,8 +818,8 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
         </div>
       )}
 
-      {/* Live AI Status with Visual Progress */}
-      {loading && (
+      {/* State: Course Curriculum Planning Card */}
+      {loading && !streamingContent && !streamingThoughts && (
         <div className="p-6 rounded-3xl bg-surface-900 border border-indigo-500/30 shadow-xl space-y-4 max-w-2xl mx-auto w-full animate-fadeIn">
           <div className="flex items-center justify-between text-xs font-bold uppercase tracking-wider">
             <div className="flex items-center gap-2 text-indigo-400">
@@ -779,7 +827,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               <span>{activeModelDisplayName}</span>
             </div>
             <span className="text-slate-400 font-medium">
-              {loadingTimeLeft > 0 ? `Осталось примерно: ~${loadingTimeLeft} сек` : 'Завершение обработки...'}
+              Проектирование плана курса...
             </span>
           </div>
 
@@ -819,7 +867,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             </div>
           )}
 
-          {/* DAG Map Ready Badge during lesson streaming */}
+          {/* DAG Map Ready Badge */}
           {dagPlan && dagPlan.nodes && dagPlan.nodes.length > 0 && (
             <div className="p-3 bg-surface-950/60 rounded-2xl border border-indigo-500/20 flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs text-indigo-300">
@@ -837,19 +885,94 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               )}
             </div>
           )}
+        </div>
+      )}
 
-          {streamingContent && (
-            <div className="mt-4 pt-4 border-t border-slate-800 space-y-3 animate-fadeIn">
-              <div className="flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                  Прямая трансляция генерации
+      {/* State: Live Streaming of Lesson Directly on Main Canvas */}
+      {loading && (streamingContent || streamingThoughts) && (
+        <div className="max-w-4xl mx-auto w-full space-y-6 animate-fadeIn relative">
+          {/* Header Card with Lesson Title and Live Badges */}
+          <div className="p-5 sm:p-6 rounded-3xl bg-surface-900 border border-indigo-500/30 shadow-xl space-y-3">
+            <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                  <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+                  Прямой эфир синтеза урока
                 </span>
-                <span className="text-[11px] text-slate-500">Стриминг токенов без задержки</span>
+                <span className="flex items-center gap-1.5 text-slate-400 font-semibold px-2.5 py-1 bg-surface-950 rounded-full border border-slate-800">
+                  <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                  {activeModelDisplayName}
+                </span>
               </div>
-              <div className="max-h-80 overflow-y-auto pr-2 rounded-xl bg-surface-950/70 p-4 border border-slate-800/80 text-sm text-slate-200 leading-relaxed font-sans prose prose-invert max-w-none">
+              <div className="flex items-center gap-2 text-indigo-300 font-medium text-xs">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                <span>{loadingMessage}</span>
+              </div>
+            </div>
+
+            <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+              {streamingLessonTitle || 'Синтез урока...'}
+            </h1>
+          </div>
+
+          {/* Reasoning Terminal (Chain of Thought) */}
+          {streamingThoughts && (
+            <div className="rounded-3xl bg-surface-900 border border-indigo-500/40 shadow-xl overflow-hidden transition-all duration-200">
+              <button
+                type="button"
+                onClick={() => setIsThinkingOpen((prev) => !prev)}
+                className="w-full px-5 py-3.5 flex items-center justify-between bg-surface-950/80 hover:bg-surface-950 border-b border-indigo-500/20 text-left transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-7 h-7 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+                    <Brain className="w-4 h-4 animate-pulse" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-indigo-200 tracking-wide">
+                        Размышления модели (Chain of Thought)
+                      </span>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-950/90 text-indigo-300 border border-indigo-500/30">
+                        {streamingThoughts.length} симв.
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      Внутренний ход рассуждений и анализ методологии Ричарда Фейнмана
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                  <span>{isThinkingOpen ? 'Свернуть' : 'Развернуть'}</span>
+                  {isThinkingOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                </div>
+              </button>
+
+              {isThinkingOpen && (
+                <div
+                  ref={thoughtsScrollRef}
+                  className="p-5 font-mono text-xs text-slate-300 leading-relaxed max-h-72 overflow-y-auto whitespace-pre-wrap select-text bg-[#070b14] space-y-1"
+                >
+                  <span className="text-slate-300">{streamingThoughts}</span>
+                  <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-cyan-400 animate-pulse align-middle" />
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Main Streaming Tutorial Canvas */}
+          {streamingContent && (
+            <div className="bg-surface-900 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-xl space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 text-xs text-slate-400 font-semibold">
+                <span className="flex items-center gap-2 text-emerald-400">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  Текст урока (Markdown & LaTeX)
+                </span>
+                <span className="text-slate-500">Посимвольный вывод</span>
+              </div>
+
+              <div className="text-sm sm:text-base text-slate-200 leading-relaxed font-sans prose prose-invert max-w-none">
                 <LatexRenderer content={streamingContent} />
-                <span className="inline-block w-1.5 h-4 ml-1 bg-indigo-400 animate-pulse align-middle" />
+                <span className="inline-block w-2 h-5 ml-1 bg-indigo-400 animate-pulse align-middle" />
               </div>
             </div>
           )}

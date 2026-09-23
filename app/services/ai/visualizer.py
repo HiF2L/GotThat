@@ -60,7 +60,8 @@ class VisualizerSubagent:
                 messages=messages,
                 model=settings.FAST_MODEL,
                 temperature=0.2,
-                timeout_seconds=35.0,
+                max_tokens=2500,
+                timeout_seconds=15.0,
                 task_type="svg_visualization",
             )
             raw_svg = result.get("svg_code", "")

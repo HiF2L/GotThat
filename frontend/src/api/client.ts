@@ -535,10 +535,24 @@ export const apiClient = {
     sessionId: string,
     conceptId?: string,
     userNotes?: string,
-    onToken?: (token: string) => void,
-    onReady?: (step: DeepStep) => void,
-    onError?: (err: any) => void
+    callbacks?:
+      | {
+          onThought?: (token: string) => void;
+          onStatus?: (message: string) => void;
+          onToken?: (token: string) => void;
+          onReady?: (step: DeepStep) => void;
+          onError?: (err: any) => void;
+        }
+      | ((token: string) => void),
+    legacyOnReady?: (step: DeepStep) => void,
+    legacyOnError?: (err: any) => void
   ): Promise<void> {
+    const onThought = typeof callbacks === 'object' ? callbacks?.onThought : undefined;
+    const onStatus = typeof callbacks === 'object' ? callbacks?.onStatus : undefined;
+    const onToken = typeof callbacks === 'function' ? callbacks : callbacks?.onToken;
+    const onReady = typeof callbacks === 'function' ? legacyOnReady : callbacks?.onReady;
+    const onError = typeof callbacks === 'function' ? legacyOnError : callbacks?.onError;
+
     const res = await fetch(`${API_BASE}/deep/stream-step`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -570,7 +584,11 @@ export const apiClient = {
           if (!raw) continue;
           try {
             const event = JSON.parse(raw);
-            if (event.type === 'token' && onToken) {
+            if (event.type === 'thought' && onThought) {
+              onThought(event.token);
+            } else if (event.type === 'status' && onStatus) {
+              onStatus(event.message);
+            } else if (event.type === 'token' && onToken) {
               onToken(event.token);
             } else if (event.type === 'ready' && onReady) {
               onReady(event.step);
@@ -596,6 +614,8 @@ export const apiClient = {
       onLog?: (message: string) => void;
       onPlanReady?: (planData: { sessionId: string; dag: PlannedDAG; mermaid?: string }) => void;
       onLessonStart?: (lessonInfo: { conceptId: string; title: string }) => void;
+      onThought?: (token: string) => void;
+      onStatus?: (message: string) => void;
       onToken?: (token: string) => void;
       onStepReady?: (step: DeepStep) => void;
       onProbing?: (action: any) => void;
@@ -651,6 +671,11 @@ export const apiClient = {
                 conceptId: event.concept_id,
                 title: event.title,
               });
+            } else if (event.type === 'thought' && callbacks?.onThought) {
+              callbacks.onThought(event.token);
+            } else if (event.type === 'status' && (callbacks?.onStatus || callbacks?.onLog)) {
+              if (callbacks.onStatus) callbacks.onStatus(event.message);
+              else if (callbacks.onLog) callbacks.onLog(event.message);
             } else if (event.type === 'token' && callbacks?.onToken) {
               callbacks.onToken(event.token);
             } else if (event.type === 'ready' && callbacks?.onStepReady) {
