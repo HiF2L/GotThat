@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional
-from app.core.database import get_db_session
+from app.core.database import get_db_session, async_session_maker
 from app.schemas.tutor import (
     StartDeepSessionRequest,
     DeepStepAnswerSubmission,
@@ -42,11 +42,21 @@ async def start_deep_session(
         )
 
     session = await tutor_state_machine.start_session(db, request)
-    next_action = await tutor_state_machine.get_next_action(
-        session=db,
-        deep_session_id=session.id,
-        user_notes=request.initial_user_context or "",
-    )
+    if session.status == "probing":
+        next_action = await tutor_state_machine.get_next_action(
+            session=db,
+            deep_session_id=session.id,
+            user_notes=request.initial_user_context or "",
+        )
+    else:
+        # Plan is ready! Return plan_ready immediately so that the frontend can stream Lesson 1 live
+        next_action = {
+            "phase": "plan_ready",
+            "session_id": session.id,
+            "dag": session.planned_dag,
+            "mermaid_diagram": session.mermaid_diagram or (session.planned_dag or {}).get("mermaid_code", ""),
+            "message": "Учебный план курса сформирован.",
+        }
     return {
         "session_id": session.id,
         "status": session.status,
@@ -442,18 +452,29 @@ async def stream_lesson_step(
                 break
 
     async def event_generator():
-        try:
-            async for event in step_executor.stream_step(
-                session=db,
-                deep_session=deep_session,
-                concept=concept,
-                step_sequence=step_seq,
-                user_notes=request.user_notes or "",
-            ):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            logger.error(f"Error in stream_step generator: {e}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+        async with async_session_maker() as stream_db:
+            try:
+                s_res = await stream_db.execute(
+                    select(DeepLearningSession).where(DeepLearningSession.id == request.session_id)
+                )
+                active_session = s_res.scalars().first()
+                c_res = await stream_db.execute(select(Concept).where(Concept.id == target_cid))
+                active_concept = c_res.scalars().first()
+                if not active_session or not active_concept:
+                    yield f"data: {json.dumps({'type': 'error', 'error': 'Session or concept not found'}, ensure_ascii=False)}\n\n"
+                    return
+
+                async for event in step_executor.stream_step(
+                    session=stream_db,
+                    deep_session=active_session,
+                    concept=active_concept,
+                    step_sequence=step_seq,
+                    user_notes=request.user_notes or "",
+                ):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                logger.error(f"Error in stream_step generator: {e}", exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),

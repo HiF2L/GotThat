@@ -795,46 +795,12 @@ class TutorStateMachine:
                     "message": "All concepts in this track are already mastered!",
                 }
 
-            # Immediately execute atomic step for the active node
-            active_node = nodes[active_idx]
-            concept_res = await session.execute(
-                select(Concept).where(Concept.id == active_node["id"])
-            )
-            concept = concept_res.scalars().first()
-            if concept:
-                try:
-                    step_payload = await step_executor.execute_atomic_step(
-                        session=session,
-                        deep_session=deep_session,
-                        concept=concept,
-                        step_sequence=active_idx + 1,
-                        user_notes=user_notes,
-                    )
-                    # Speculatively pre-generate next lesson in background while user reads this one
-                    if active_idx + 1 < len(nodes):
-                        next_node = nodes[active_idx + 1]
-                        step_executor.trigger_background_prefetch(
-                            user_id=deep_session.user_id,
-                            session_id=deep_session.id,
-                            concept_id=next_node["id"],
-                            step_sequence=active_idx + 2,
-                            user_notes=user_notes,
-                        )
-                    return {
-                        "phase": "step_ready",
-                        "step": step_payload,
-                        "dag": planned_dag_schema,
-                        "mermaid_diagram": planned_dag_schema.mermaid_code,
-                        "session_id": deep_session.id,
-                    }
-                except Exception as e:
-                    logger.error(f"Failed to execute initial step on plan generation: {e}", exc_info=True)
-
             return {
                 "phase": "plan_ready",
                 "dag": planned_dag_schema,
                 "mermaid_diagram": planned_dag_schema.mermaid_code,
                 "session_id": deep_session.id,
+                "message": "Учебный план курса успешно сформирован.",
             }
 
         # 3. State: TEACHING

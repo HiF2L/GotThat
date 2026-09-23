@@ -148,6 +148,75 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     }
   };
 
+  const handleSelectConceptNode = async (
+    conceptId: string,
+    activeSessionId?: string,
+    overrideDag?: PlannedDAG | null,
+    force?: boolean
+  ) => {
+    if (!userId) return;
+    if (!force && (loading || isNavigatingRef.current)) return;
+    isNavigatingRef.current = true;
+    loadedTargetRef.current = conceptId;
+    setLoading(true);
+    setStreamingContent('');
+    setLoadingMessage('Синтез урока в реальном времени...');
+
+    const currentSid = activeSessionId || sessionId;
+    const currentDag = overrideDag || dagPlan;
+
+    try {
+      if (currentSid && currentDag?.nodes?.some((n) => n.id === conceptId || n.slug === conceptId)) {
+        try {
+          await apiClient.streamLessonStep(
+            currentSid,
+            conceptId,
+            yapNote,
+            (token) => {
+              setStreamingContent((prev) => prev + token);
+            },
+            (step) => {
+              setCurrentStep(step);
+              const activeConceptKey = step.concept_id;
+              loadedTargetRef.current = activeConceptKey;
+              if (onActiveConceptChange) {
+                onActiveConceptChange(
+                  activeConceptKey,
+                  step.track_slug || step.track_id
+                );
+              }
+              setLoading(false);
+              setStreamingContent('');
+            },
+            (err) => {
+              console.warn('Streaming step fallback to selectStep:', err);
+              apiClient.selectStep(currentSid, conceptId, yapNote).then((action) => {
+                handleTutorActionResponse(action, currentSid);
+              });
+            }
+          );
+          return;
+        } catch (streamErr) {
+          console.warn('Streaming step error, falling back to selectStep:', streamErr);
+          const action = await apiClient.selectStep(currentSid, conceptId, yapNote);
+          handleTutorActionResponse(action, currentSid);
+        }
+      } else {
+        const sessionRes = await apiClient.startDeepSession(userId, conceptId, yapNote, language);
+        if (sessionRes.session_id) {
+          setSessionId(sessionRes.session_id);
+          handleTutorActionResponse(sessionRes.initial_action, sessionRes.session_id);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to switch concept:', err);
+      setLoading(false);
+      setStreamingContent('');
+    } finally {
+      isNavigatingRef.current = false;
+    }
+  };
+
   const handleTutorActionResponse = (actionData: any, activeSessionId?: string) => {
     if (!actionData) return;
     const phase = actionData.phase;
@@ -160,8 +229,11 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       setLoading(false);
     } else if (phase === 'plan_ready') {
       setDagPlan(actionData.dag);
-      setLoadingMessage('Подготовка учебного плана...');
-      if (currentSid) {
+      setLoadingMessage('Запуск первого урока...');
+      const firstConceptId = actionData.dag?.nodes?.[0]?.id || actionData.dag?.nodes?.[0]?.concept_id;
+      if (currentSid && firstConceptId) {
+        handleSelectConceptNode(firstConceptId, currentSid, actionData.dag, true);
+      } else if (currentSid) {
         requestNextAction(currentSid);
       }
     } else if (phase === 'step_ready' || phase === 'completed') {
@@ -185,14 +257,21 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
   const requestNextAction = async (sId: string, notes: string = '') => {
     setLoading(true);
+    setStreamingContent('');
     setLoadingMessage('Загрузка следующего шага...');
     try {
+      const uncompletedNode = dagPlan?.nodes?.find((n) => n.status !== 'completed');
+      if (uncompletedNode) {
+        await handleSelectConceptNode(uncompletedNode.id, sId, dagPlan, true);
+        return;
+      }
       const notesToSend = notes || yapNote;
       const action = await apiClient.getNextTutorAction(sId, notesToSend);
       handleTutorActionResponse(action, sId);
     } catch (err) {
       console.error('Failed to get next action:', err);
       setLoading(false);
+      setStreamingContent('');
     }
   };
 
@@ -356,65 +435,6 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     }
   };
 
-
-  const handleSelectConceptNode = async (conceptId: string) => {
-    if (!userId || loading || isNavigatingRef.current) return;
-    isNavigatingRef.current = true;
-    loadedTargetRef.current = conceptId;
-    setLoading(true);
-    setStreamingContent('');
-    setLoadingMessage('Синтез урока в реальном времени...');
-    try {
-      if (sessionId && dagPlan?.nodes?.some((n) => n.id === conceptId || n.slug === conceptId)) {
-        try {
-          await apiClient.streamLessonStep(
-            sessionId,
-            conceptId,
-            yapNote,
-            (token) => {
-              setStreamingContent((prev) => prev + token);
-            },
-            (step) => {
-              setCurrentStep(step);
-              const activeConceptKey = step.concept_id;
-              loadedTargetRef.current = activeConceptKey;
-              if (onActiveConceptChange) {
-                onActiveConceptChange(
-                  activeConceptKey,
-                  step.track_slug || step.track_id
-                );
-              }
-              setLoading(false);
-              setStreamingContent('');
-            },
-            (err) => {
-              console.warn('Streaming step fallback to selectStep:', err);
-              apiClient.selectStep(sessionId, conceptId, yapNote).then((action) => {
-                handleTutorActionResponse(action, sessionId);
-              });
-            }
-          );
-          return;
-        } catch (streamErr) {
-          console.warn('Streaming step error, falling back to selectStep:', streamErr);
-          const action = await apiClient.selectStep(sessionId, conceptId, yapNote);
-          handleTutorActionResponse(action, sessionId);
-        }
-      } else {
-        const sessionRes = await apiClient.startDeepSession(userId, conceptId, yapNote, language);
-        if (sessionRes.session_id) {
-          setSessionId(sessionRes.session_id);
-          handleTutorActionResponse(sessionRes.initial_action, sessionRes.session_id);
-        }
-      }
-    } catch (err) {
-      console.error('Failed to switch concept:', err);
-      setLoading(false);
-      setStreamingContent('');
-    } finally {
-      isNavigatingRef.current = false;
-    }
-  };
 
   const handleRegenerateStep = async () => {
     if (!sessionId || !currentStep || isRegenerating) return;

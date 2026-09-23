@@ -361,8 +361,7 @@ class AIClientManager:
 
         except asyncio.TimeoutError:
             latency_ms = int((time.time() - start_time) * 1000)
-            logger.error(f"[TIMEOUT] Primary model '{chosen_model}' timed out after {call_timeout}s.")
-            # Record timeout to ledger, do NOT cascade through 3 paid models!
+            logger.warning(f"[TIMEOUT] Primary model '{chosen_model}' timed out after {call_timeout}s. Recording and trying safe fallback...")
             await cost_tracker.record_usage(
                 task_type=task_type,
                 model=chosen_model,
@@ -372,6 +371,42 @@ class AIClientManager:
                 status="timeout",
                 error_message=f"Timeout after {call_timeout}s",
             )
+            # Try single safe fast fallback so request does not fail
+            fallback_model = self.normalize_model_name(settings.FAST_MODEL)
+            if fallback_model != chosen_model:
+                try:
+                    fb_start = time.time()
+                    fb_kwargs = self._prepare_kwargs(
+                        model=fallback_model,
+                        messages=messages,
+                        temperature=temperature,
+                        response_format=response_format,
+                        max_tokens=max_tokens,
+                    )
+                    fb_resp = await asyncio.wait_for(
+                        self.main_client.chat.completions.create(**fb_kwargs),
+                        timeout=45.0,
+                    )
+                    fb_latency = int((time.time() - fb_start) * 1000)
+                    fb_choices = getattr(fb_resp, "choices", [])
+                    if fb_choices and fb_choices[0].message:
+                        fb_content = (getattr(fb_choices[0].message, "content", None) or "").strip()
+                        if fb_content:
+                            usage = getattr(fb_resp, "usage", None)
+                            prompt_tokens = _safe_int(getattr(usage, "prompt_tokens", 0) if usage else 0)
+                            completion_tokens = _safe_int(getattr(usage, "completion_tokens", 0) if usage else 0)
+                            await cost_tracker.record_usage(
+                                task_type=f"{task_type}_fallback",
+                                model=fallback_model,
+                                prompt_tokens=prompt_tokens,
+                                completion_tokens=completion_tokens,
+                                latency_ms=fb_latency,
+                                status="success",
+                                details={"primary_model_timed_out": chosen_model, "timeout_sec": call_timeout},
+                            )
+                            return fb_content
+                except Exception as fb_err:
+                    logger.error(f"Fallback model '{fallback_model}' after timeout also failed: {fb_err}")
             raise TimeoutError(f"Model '{chosen_model}' timed out after {call_timeout}s")
 
         except Exception as e:

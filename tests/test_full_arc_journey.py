@@ -155,6 +155,9 @@ async def test_continuous_multi_concept_arc():
                     option_id="idk",
                 )
 
+            if probe_action.get("phase") == "plan_ready":
+                probe_action = await tutor_state_machine.get_next_action(session, deep_session.id)
+
             assert probe_action["phase"] == "step_ready"
             dag = probe_action["dag"]
             assert len(dag.nodes) >= 3 # Full multi-step tailored DAG generated!
