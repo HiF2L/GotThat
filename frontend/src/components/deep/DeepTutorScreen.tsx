@@ -273,6 +273,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       currentStep.step_sequence,
       [selectedOptionId],
       yapNote,
+      currentStep.concept_id,
     );
 
     if (res.is_correct) {
@@ -483,7 +484,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-amber-300 flex items-center gap-1.5">
                 <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
-                <span>Voice Reasoning</span>
+                <span>Голосовые заметки</span>
               </span>
               {isProbeTranscribing && (
                 <span className="text-[11px] text-amber-300 flex items-center gap-1 font-semibold animate-pulse">

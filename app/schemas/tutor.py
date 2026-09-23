@@ -60,6 +60,7 @@ class DeepStepAnswerSubmission(BaseModel):
     session_id: str
     step_sequence: int
     selected_option_ids: List[str]
+    concept_id: Optional[str] = None
     yap_text_note: Optional[str] = None
     user_voice_transcript: Optional[str] = None
 

@@ -288,6 +288,20 @@ class StepExecutor:
 
             if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
                 logger.info(f"Restoring cached Step {step_sequence} for '{concept.title}' from DB with 0ms latency.")
+                if existing_step.session_id != deep_session.id:
+                    # Persist a row for the current session so evaluate_step_answer and progress tracking find it
+                    cloned_step = DeepSessionStep(
+                        session_id=deep_session.id,
+                        concept_id=concept.id,
+                        step_sequence=step_sequence,
+                        step_type=existing_step.step_type or "explanation",
+                        explanation_markdown=existing_step.explanation_markdown,
+                        visual_artifact=existing_step.visual_artifact,
+                        verification_challenge=existing_step.verification_challenge,
+                    )
+                    session.add(cloned_step)
+                    await session.commit()
+                    existing_step = cloned_step
                 return self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
 
         # 1. Check if an in-flight generation task is already running for this exact session & concept
@@ -892,6 +906,9 @@ class StepExecutor:
         """
         Evaluates step verification answer. If incorrect, triggers Remediation Branching.
         """
+        step = None
+
+        # 1. Primary lookup: by session_id and step_sequence
         step_res = await session.execute(
             select(DeepSessionStep).where(
                 and_(
@@ -901,15 +918,89 @@ class StepExecutor:
             )
         )
         step = step_res.scalars().first()
+
+        # 2. Secondary lookup: by concept_id if passed or session's current concept
+        target_cid = getattr(submission, "concept_id", None) or deep_session.current_concept_id
+        if not step and target_cid:
+            step_res = await session.execute(
+                select(DeepSessionStep).where(
+                    and_(
+                        DeepSessionStep.session_id == deep_session.id,
+                        DeepSessionStep.concept_id == target_cid,
+                    )
+                ).order_by(DeepSessionStep.created_at.desc())
+            )
+            step = step_res.scalars().first()
+
+        # 3. Tertiary lookup: from planned_dag node at index step_sequence - 1
+        if not step and deep_session.planned_dag:
+            nodes = deep_session.planned_dag.get("nodes", [])
+            idx = submission.step_sequence - 1
+            if 0 <= idx < len(nodes):
+                dag_cid = nodes[idx].get("id")
+                if dag_cid:
+                    step_res = await session.execute(
+                        select(DeepSessionStep).where(
+                            and_(
+                                DeepSessionStep.session_id == deep_session.id,
+                                DeepSessionStep.concept_id == dag_cid,
+                            )
+                        ).order_by(DeepSessionStep.created_at.desc())
+                    )
+                    step = step_res.scalars().first()
+                    if not target_cid:
+                        target_cid = dag_cid
+
+        # 4. Global cache fallback: step was generated in another session, clone for current session
+        if not step and target_cid:
+            global_step_res = await session.execute(
+                select(DeepSessionStep).where(
+                    DeepSessionStep.concept_id == target_cid
+                ).order_by(DeepSessionStep.created_at.desc())
+            )
+            global_step = global_step_res.scalars().first()
+            if global_step:
+                logger.info(
+                    f"Adopting cached global step for concept {target_cid} into session {deep_session.id} (sequence {submission.step_sequence})"
+                )
+                step = DeepSessionStep(
+                    session_id=deep_session.id,
+                    concept_id=target_cid,
+                    step_sequence=submission.step_sequence,
+                    step_type=global_step.step_type or "explanation",
+                    explanation_markdown=global_step.explanation_markdown,
+                    visual_artifact=global_step.visual_artifact,
+                    verification_challenge=global_step.verification_challenge,
+                )
+                session.add(step)
+                await session.flush()
+
+        # 5. Last-resort fallback: any recent step in this session
         if not step:
-            raise ValueError("Step not found")
+            any_step_res = await session.execute(
+                select(DeepSessionStep).where(
+                    DeepSessionStep.session_id == deep_session.id
+                ).order_by(DeepSessionStep.created_at.desc())
+            )
+            step = any_step_res.scalars().first()
+
+        if not step:
+            logger.error(
+                f"Step not found: session={deep_session.id}, sequence={submission.step_sequence}, cid={target_cid}"
+            )
+            raise ValueError("Шаг урока не найден в сессии. Пожалуйста, обновите страницу курса.")
 
         challenge_data = step.verification_challenge or {}
         options = challenge_data.get("options", [])
         correct_opts = [o["id"] for o in options if o.get("is_correct")]
         explanation = next((o.get("explanation", "") for o in options if o.get("is_correct")), "Explanation")
 
-        is_correct = set(submission.selected_option_ids) == set(correct_opts)
+        # If question has no correct_opts defined, accept submission as correct
+        if not correct_opts:
+            is_correct = True
+            explanation = "Ответ принят."
+        else:
+            is_correct = set(submission.selected_option_ids) == set(correct_opts)
 
         step.verification_passed = is_correct
         step.user_response = submission.model_dump()

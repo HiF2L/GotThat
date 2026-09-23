@@ -514,7 +514,7 @@ export const StepViewer: React.FC<StepViewerProps> = React.memo(({
               <div className="absolute bottom-full left-0 mb-2.5 hidden group-hover:block w-80 p-3 bg-surface-950 border border-emerald-500 rounded-2xl shadow-2xl z-50 text-[11px] text-slate-300 leading-relaxed pointer-events-none animate-fadeIn">
                 <div className="font-bold text-emerald-300 mb-1 flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
-                  Метод Фейнмана (Voice Reasoning)
+                  Метод Фейнмана (Мышление вслух)
                 </div>
                 Надиктуйте или запишите свои догадки, сомнения и логику. ИИ-тьютор учтет ход ваших мыслей при проверке теста и адаптирует следующие уроки под вас.
               </div>

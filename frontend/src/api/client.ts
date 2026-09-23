@@ -204,6 +204,7 @@ export const apiClient = {
     stepSequence: number,
     selectedOptionIds: string[],
     yapTextNote?: string,
+    conceptId?: string,
   ): Promise<DeepStepResult> {
     const res = await fetch(`${API_BASE}/deep/submit-step`, {
       method: 'POST',
@@ -213,9 +214,13 @@ export const apiClient = {
         step_sequence: stepSequence,
         selected_option_ids: selectedOptionIds,
         yap_text_note: yapTextNote,
+        concept_id: conceptId,
       }),
     });
-    if (!res.ok) throw new Error('Failed to submit step answer');
+    if (!res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.detail || 'Не удалось отправить ответ. Пожалуйста, попробуйте еще раз.');
+    }
     return res.json();
   },
 

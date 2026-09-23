@@ -133,17 +133,16 @@ export const QuizCard: React.FC<QuizCardProps> = React.memo(({
         {!result ? (
           <div className="space-y-2.5">
             {/* Action Bar: Voice Yap or Standard Tap */}
-            <div className="flex flex-col sm:flex-row items-center gap-2.5">
+            <div className="flex items-center gap-2.5">
               <VoiceRecorder
                 onAudioRecorded={handleVoiceRecordFinished}
                 disabled={!selectedOptionId || isSubmitting}
-                className="w-full sm:w-auto"
               />
 
               <button
                 onClick={handleDirectSubmit}
                 disabled={!selectedOptionId || isSubmitting}
-                className="flex-1 w-full h-[38px] px-5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-colors active:scale-[0.99]"
+                className="flex-1 h-[38px] px-5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-semibold text-xs sm:text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-colors active:scale-[0.99]"
               >
                 {isSubmitting ? (
                   <>

@@ -133,24 +133,30 @@ async def submit_step_verification(
     Submits user answer for the current step's verification challenge.
     Unlocks progress or triggers Remediation Branching on mistake.
     """
-    session_res = await db.execute(
-        select(DeepLearningSession).where(DeepLearningSession.id == submission.session_id)
-    )
-    deep_session = session_res.scalars().first()
-    if not deep_session:
-        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        session_res = await db.execute(
+            select(DeepLearningSession).where(DeepLearningSession.id == submission.session_id)
+        )
+        deep_session = session_res.scalars().first()
+        if not deep_session:
+            raise HTTPException(status_code=404, detail="Сессия обучения не найдена.")
 
-    result = await step_executor.evaluate_step_answer(
-        session=db,
-        deep_session=deep_session,
-        submission=submission,
-    )
+        result = await step_executor.evaluate_step_answer(
+            session=db,
+            deep_session=deep_session,
+            submission=submission,
+        )
 
-    if result.is_correct:
-        # Advance DAG to next node
-        await tutor_state_machine.advance_to_next_node(db, deep_session.id)
+        if result.is_correct:
+            # Advance DAG to next node
+            await tutor_state_machine.advance_to_next_node(db, deep_session.id)
 
-    return result
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error submitting step answer: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка проверки ответа: {str(e)}")
 
 
 from fastapi import UploadFile, File
