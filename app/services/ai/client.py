@@ -279,6 +279,39 @@ def sanitize_markdown_text(text: str) -> str:
     return cleaned
 
 
+REASONING_AND_COMPLETION_MODELS = (
+    "/o1", "/o3", "/o4", "o1-", "o3-", "o4-",
+    "gpt-5", "gpt-6", "terra", "luna", "astra",
+)
+NO_TEMPERATURE_MODELS = REASONING_AND_COMPLETION_MODELS + ("kimi",)
+
+
+def get_max_completion_tokens_for_model(model_name: str, requested: Optional[int] = None) -> int:
+    """
+    Returns the maximum safe output completion token limit for a given model.
+    Guarantees massive room (up to 32k-64k tokens) so comprehensive tutorials never get cut off,
+    while safely clamping to each model provider's ceiling.
+    """
+    norm = (model_name or "").lower()
+
+    if "claude-sonnet-5" in norm or "claude-fable" in norm or "claude-opus-5" in norm:
+        cap = 64000
+    elif "deepseek-v4-pro" in norm or "gpt-5.6-terra" in norm or "gpt-4.1" in norm or "gpt-6" in norm or "terra" in norm:
+        cap = 32768
+    elif "deepseek" in norm and ("flash" in norm or "v4" in norm):
+        cap = 16384
+    elif any(k in norm for k in ["gpt-4.1-mini", "grok", "qwen3.8-max", "glm-5.3", "luna", "o4", "qwen3.8-flash"]):
+        cap = 16384
+    elif any(k in norm for k in ["gemini", "deepseek-chat", "kimi"]):
+        cap = 8192
+    else:
+        cap = 16384
+
+    if requested and requested > 0:
+        return min(requested, cap)
+    return cap
+
+
 class AIClientManager:
     """
     Unified AI Gateway Manager for the GotIt educational ecosystem.
@@ -436,8 +469,9 @@ class AIClientManager:
     ) -> Dict[str, Any]:
         """
         Dynamically adjusts kwargs according to model capabilities and ProxyAPI quirks:
+        - Modern OpenAI (gpt-5.*, gpt-6.*, o1/o3/o4) require max_completion_tokens and reject custom temperature.
         - moonshotai/kimi-k3 rejects custom temperature (HTTP 400).
-        - o1/o3 reasoning models reject temperature and require max_completion_tokens.
+        - Guarantees massive room (up to 32k-64k tokens) so tutorials are never truncated.
         - stream_options: includes token usage in the final stream chunk.
         """
         clean_model = self.normalize_model_name(model)
@@ -446,19 +480,19 @@ class AIClientManager:
             "messages": messages,
         }
 
-        # Temperature handling
-        is_kimi = "kimi" in clean_model
-        is_reasoning_o_series = any(p in clean_model for p in ["/o1", "/o3", "/o4", "o1-", "o3-"])
-
-        if not is_kimi and not is_reasoning_o_series and temperature is not None:
+        # Temperature handling (omit for reasoning and kimi models)
+        omit_temp = any(p in clean_model for p in NO_TEMPERATURE_MODELS)
+        if not omit_temp and temperature is not None:
             kwargs["temperature"] = temperature
 
-        # Token limits
-        if max_tokens:
-            if is_reasoning_o_series:
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
+        # Token limits: guarantee massive room for exhaustive generation without truncation
+        effective_tokens = get_max_completion_tokens_for_model(clean_model, requested=max_tokens)
+        use_max_completion = any(p in clean_model for p in REASONING_AND_COMPLETION_MODELS)
+
+        if use_max_completion:
+            kwargs["max_completion_tokens"] = effective_tokens
+        else:
+            kwargs["max_tokens"] = effective_tokens
 
         if response_format:
             kwargs["response_format"] = response_format
@@ -776,11 +810,12 @@ class AIClientManager:
         Guaranteed JSON extraction from LLM responses with prompt instructions and robust fallback.
         """
         chosen_model = model or settings.FAST_MODEL
+        target_max_tokens = max_tokens or get_max_completion_tokens_for_model(chosen_model, 32768)
         content = await self.generate_chat(
             messages=messages,
             model=chosen_model,
             temperature=temperature,
-            max_tokens=max_tokens or 8192,
+            max_tokens=target_max_tokens,
             timeout_seconds=timeout_seconds,
             task_type=task_type,
         )

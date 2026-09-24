@@ -26,6 +26,28 @@ from app.services.cognitive.bkt_engine import bkt_engine
 logger = logging.getLogger(__name__)
 
 
+def is_valid_complete_step(explanation: Optional[str]) -> bool:
+    """
+    Validates whether a cached tutorial step is complete and healthy,
+    or was cut off/truncated mid-generation by token limits.
+    """
+    if not explanation or len(explanation.strip()) < 100:
+        return False
+    cleaned = explanation.strip()
+    # Check if ends abruptly with unclosed word, dangling hyphen, unfinished bold or quote
+    if cleaned.endswith(("-", "—", "**", "*", "`", "«", "...", " и", " но", " что", " или", " для", " при")):
+        return False
+    last_line = cleaned.splitlines()[-1].strip()
+    if last_line and len(last_line) > 15 and not last_line.startswith(("#", ">")):
+        # If line contains unclosed quotes/brackets/bold
+        if last_line.count("«") > last_line.count("»") or last_line.count("**") % 2 != 0:
+            return False
+        # Sentence cut-off detection
+        if not last_line.endswith((".", "!", "?", "»", '"', ")", "```", "$$", ":", "---", "}")):
+            return False
+    return True
+
+
 class StepExecutor:
     """
     Implements Phase 3 (TEACH) from the reference video:
@@ -357,7 +379,7 @@ class StepExecutor:
                 .order_by(DeepSessionStep.created_at.desc())
             )
             for s in existing_step_res.scalars().all():
-                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                     existing_step = s
                     break
 
@@ -373,11 +395,11 @@ class StepExecutor:
                     .order_by(DeepSessionStep.created_at.desc())
                 )
                 for s in global_step_res.scalars().all():
-                    if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                    if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                         existing_step = s
                         break
 
-            if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
+            if existing_step and existing_step.explanation_markdown and is_valid_complete_step(existing_step.explanation_markdown):
                 logger.info(f"Restoring cached Step {step_sequence} for '{concept.title}' from DB with 0ms latency.")
                 if existing_step.session_id != deep_session.id:
                     # Persist a row for the current session so evaluate_step_answer and progress tracking find it
@@ -488,7 +510,7 @@ class StepExecutor:
             .order_by(DeepSessionStep.created_at.desc())
         )
         for s in existing_step_res.scalars().all():
-            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+            if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                 existing_step = s
                 break
 
@@ -504,7 +526,7 @@ class StepExecutor:
                 .order_by(DeepSessionStep.created_at.desc())
             )
             for s in global_step_res.scalars().all():
-                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                     cloned = DeepSessionStep(
                         session_id=deep_session.id,
                         concept_id=concept.id,
@@ -523,7 +545,7 @@ class StepExecutor:
                     existing_step = cloned
                     break
 
-        if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
+        if existing_step and existing_step.explanation_markdown and is_valid_complete_step(existing_step.explanation_markdown):
             payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
             from app.services.ai.tts_service import tts_service
             asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
@@ -623,6 +645,7 @@ class StepExecutor:
             messages=messages,
             model=active_model,
             temperature=0.25,
+            max_tokens=32768,
             timeout_seconds=120.0,
             task_type="step_teaching",
         )
@@ -804,7 +827,7 @@ class StepExecutor:
                 ],
                 model=settings.FAST_MODEL,
                 temperature=0.3,
-                max_tokens=6144,
+                max_tokens=32768,
                 timeout_seconds=15.0,
             )
             from app.services.ai.client import extract_json_or_fallback
@@ -1239,7 +1262,7 @@ class StepExecutor:
             .order_by(DeepSessionStep.created_at.desc())
         )
         for s in existing_step_res.scalars().all():
-            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+            if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                 existing_step = s
                 break
 
@@ -1256,7 +1279,7 @@ class StepExecutor:
                 .order_by(DeepSessionStep.created_at.desc())
             )
             for s in global_step_res.scalars().all():
-                if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+                if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                     cloned = DeepSessionStep(
                         session_id=deep_session.id,
                         concept_id=concept.id,
@@ -1275,7 +1298,7 @@ class StepExecutor:
                     existing_step = cloned
                     break
 
-        if existing_step and existing_step.explanation_markdown and len(existing_step.explanation_markdown.strip()) > 50:
+        if existing_step and existing_step.explanation_markdown and is_valid_complete_step(existing_step.explanation_markdown):
             payload = self._build_step_payload_from_db(existing_step, concept, deep_session, step_sequence)
             from app.services.ai.tts_service import tts_service
             asyncio.create_task(tts_service.prefetch_audio(payload.explanation_markdown))
@@ -1394,6 +1417,7 @@ class StepExecutor:
             messages=messages,
             model=active_model,
             temperature=0.25,
+            max_tokens=32768,
             task_type="step_stream",
         ):
             if ev.get("type") == "thought":

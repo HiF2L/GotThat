@@ -164,7 +164,7 @@ class PlanPhaseManager:
                 messages=messages,
                 model=active_plan_model,
                 temperature=0.25,
-                max_tokens=14000,
+                max_tokens=32768,
                 task_type="plan_generation",
             ):
                 chunks.append(chunk)
@@ -199,7 +199,7 @@ class PlanPhaseManager:
                     messages=messages,
                     model=getattr(settings, "PLAN_MODEL", "openai/gpt-4.1-mini"),
                     temperature=0.25,
-                    max_tokens=14000,
+                    max_tokens=32768,
                     task_type="plan_generation_fallback",
                 )
 
@@ -473,7 +473,7 @@ class PlanPhaseManager:
                 messages=messages,
                 model=getattr(settings, "PLAN_MODEL", settings.DEEP_MODEL),
                 temperature=0.25,
-                max_tokens=14000,
+                max_tokens=32768,
                 timeout_seconds=120.0,
                 task_type="plan_expand",
             )
