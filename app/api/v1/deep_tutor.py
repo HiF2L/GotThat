@@ -18,10 +18,12 @@ from app.services.tutor.tutor_state_machine import tutor_state_machine
 from app.services.tutor.step_executor import step_executor
 from app.models.session import DeepLearningSession, DeepSessionStep
 from app.models.ontology import Concept
+from app.models.mastery import User
 from app.config import settings
 from app.services.ai.client import ai_clients
 from app.services.ai.cost_tracker import cost_tracker
 from app.services.moderation import moderation_service
+from app.services.tutor.step_executor import step_executor, is_valid_complete_step
 from sqlalchemy import select, and_, delete, or_
 
 logger = logging.getLogger("got_it.deep_tutor")
@@ -37,51 +39,150 @@ async def get_active_session(
 ):
     """
     Returns the user's ongoing DeepLearningSession to instantly restore state on reload.
+    Supports resolving session by:
+    1. Direct session_id
+    2. Target concept step lookup (finds the exact session containing this concept)
+    3. Target concept track / session match
+    4. User resolution (by User.id or User.username, with graceful fallback)
+    Also embeds cached_step if available to allow single-trip instant UI hydration.
     """
+    sess = None
+
+    # 1. Direct session ID lookup if provided
     if session_id:
         s_res = await db.execute(
             select(DeepLearningSession).where(DeepLearningSession.id == session_id)
         )
         sess = s_res.scalars().first()
-        if sess:
-            return {
-                "session_id": sess.id,
-                "status": sess.status,
-                "current_concept_index": sess.current_concept_index,
-                "current_concept_id": sess.current_concept_id,
-                "planned_dag": sess.planned_dag,
-                "mermaid_diagram": sess.mermaid_diagram,
-                "language": sess.language,
-                "depth_level": sess.depth_level,
-            }
 
-    query = select(DeepLearningSession).where(DeepLearningSession.user_id == user_id)
-    if target_concept_id:
+    # 2. Resolve user entity (supports UUID, username, or fallback to first user)
+    effective_user_id = user_id
+    u_res = await db.execute(
+        select(User).where(or_(User.id == user_id, User.username == user_id))
+    )
+    user_obj = u_res.scalars().first()
+    if user_obj:
+        effective_user_id = user_obj.id
+    else:
+        first_user = (await db.execute(select(User).limit(1))).scalars().first()
+        if first_user:
+            effective_user_id = first_user.id
+
+    target_concept = None
+    if not sess and target_concept_id:
         c_res = await db.execute(
             select(Concept).where(
-                or_(Concept.id == target_concept_id, Concept.slug == target_concept_id)
+                or_(
+                    Concept.id == target_concept_id,
+                    Concept.slug == target_concept_id,
+                    Concept.code == target_concept_id,
+                )
             )
         )
         target_concept = c_res.scalars().first()
-        if target_concept and target_concept.track_id:
-            track_concepts_res = await db.execute(select(Concept.id).where(Concept.track_id == target_concept.track_id))
-            track_cids = [c for c in track_concepts_res.scalars().all()]
-            query = query.where(
-                or_(
-                    DeepLearningSession.target_concept_id == target_concept.id,
-                    DeepLearningSession.target_concept_id.in_(track_cids),
-                )
-            )
-        elif target_concept:
-            query = query.where(DeepLearningSession.target_concept_id == target_concept.id)
-        else:
-            query = query.where(DeepLearningSession.target_concept_id == target_concept_id)
 
-    query = query.order_by(DeepLearningSession.created_at.desc())
-    s_res = await db.execute(query)
-    sess = s_res.scalars().first()
+        # 3. Check if any session already has a generated step for this concept!
+        if target_concept:
+            step_sess_res = await db.execute(
+                select(DeepLearningSession)
+                .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
+                .where(
+                    and_(
+                        DeepLearningSession.user_id == effective_user_id,
+                        DeepSessionStep.concept_id == target_concept.id,
+                    )
+                )
+                .order_by(DeepSessionStep.created_at.desc())
+            )
+            sess = step_sess_res.scalars().first()
+            if not sess:
+                # Fallback without user_id restriction
+                step_sess_res = await db.execute(
+                    select(DeepLearningSession)
+                    .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
+                    .where(DeepSessionStep.concept_id == target_concept.id)
+                    .order_by(DeepSessionStep.created_at.desc())
+                )
+                sess = step_sess_res.scalars().first()
+
+        # 4. Check track or target_concept_id on the session itself
+        if not sess:
+            query = select(DeepLearningSession).where(DeepLearningSession.user_id == effective_user_id)
+            if target_concept and target_concept.track_id:
+                track_concepts_res = await db.execute(
+                    select(Concept.id).where(Concept.track_id == target_concept.track_id)
+                )
+                track_cids = track_concepts_res.scalars().all()
+                query = query.where(
+                    or_(
+                        DeepLearningSession.target_concept_id == target_concept.id,
+                        DeepLearningSession.target_concept_id.in_(track_cids),
+                    )
+                )
+            elif target_concept:
+                query = query.where(DeepLearningSession.target_concept_id == target_concept.id)
+            else:
+                query = query.where(DeepLearningSession.target_concept_id == target_concept_id)
+
+            query = query.order_by(DeepLearningSession.created_at.desc())
+            sess = (await db.execute(query)).scalars().first()
+
+            if not sess and target_concept:
+                # Fallback without user_id restriction
+                fb_query = select(DeepLearningSession)
+                if target_concept.track_id:
+                    track_concepts_res = await db.execute(
+                        select(Concept.id).where(Concept.track_id == target_concept.track_id)
+                    )
+                    track_cids = track_concepts_res.scalars().all()
+                    fb_query = fb_query.where(
+                        or_(
+                            DeepLearningSession.target_concept_id == target_concept.id,
+                            DeepLearningSession.target_concept_id.in_(track_cids),
+                        )
+                    )
+                else:
+                    fb_query = fb_query.where(DeepLearningSession.target_concept_id == target_concept.id)
+                fb_query = fb_query.order_by(DeepLearningSession.created_at.desc())
+                sess = (await db.execute(fb_query)).scalars().first()
+
+    # 5. Fallback: latest session for user
+    if not sess:
+        latest_res = await db.execute(
+            select(DeepLearningSession)
+            .where(DeepLearningSession.user_id == effective_user_id)
+            .order_by(DeepLearningSession.created_at.desc())
+        )
+        sess = latest_res.scalars().first()
+
     if not sess:
         raise HTTPException(status_code=404, detail="No active session found")
+
+    # 6. Try embedding the target or current lesson step for instant 0-latency UI hydration
+    cached_step_dict = None
+    cid_to_check = (target_concept.id if target_concept else None) or sess.current_concept_id
+    if cid_to_check:
+        step_res = await db.execute(
+            select(DeepSessionStep)
+            .where(
+                and_(
+                    DeepSessionStep.session_id == sess.id,
+                    DeepSessionStep.concept_id == cid_to_check,
+                    DeepSessionStep.explanation_markdown.isnot(None),
+                )
+            )
+            .order_by(DeepSessionStep.created_at.desc())
+        )
+        for s in step_res.scalars().all():
+            if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
+                c_step = target_concept
+                if not c_step or c_step.id != s.concept_id:
+                    c_step = (await db.execute(select(Concept).where(Concept.id == s.concept_id))).scalars().first()
+                if c_step:
+                    seq = s.step_sequence or (sess.current_concept_index + 1)
+                    payload = step_executor._build_step_payload_from_db(s, c_step, sess, seq)
+                    cached_step_dict = payload.model_dump()
+                break
 
     return {
         "session_id": sess.id,
@@ -92,6 +193,7 @@ async def get_active_session(
         "mermaid_diagram": sess.mermaid_diagram,
         "language": sess.language,
         "depth_level": sess.depth_level,
+        "cached_step": cached_step_dict,
     }
 
 
@@ -108,7 +210,13 @@ async def get_cached_step(
     Returns DeepStepPayload in < 10ms with 0 LLM calls, or 404 if step needs generation.
     """
     c_res = await db.execute(
-        select(Concept).where(or_(Concept.id == concept_id, Concept.slug == concept_id))
+        select(Concept).where(
+            or_(
+                Concept.id == concept_id,
+                Concept.slug == concept_id,
+                Concept.code == concept_id,
+            )
+        )
     )
     concept = c_res.scalars().first()
     if not concept:
@@ -131,7 +239,7 @@ async def get_cached_step(
             .order_by(DeepSessionStep.created_at.desc())
         )
         for s in step_res.scalars().all():
-            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+            if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                 existing_step = s
                 break
 
@@ -147,7 +255,7 @@ async def get_cached_step(
             .order_by(DeepSessionStep.created_at.desc())
         )
         for s in global_step_res.scalars().all():
-            if s.explanation_markdown and len(s.explanation_markdown.strip()) > 50:
+            if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
                 if deep_session:
                     seq = step_sequence or (deep_session.current_concept_index + 1)
                     cloned = DeepSessionStep(
@@ -170,7 +278,7 @@ async def get_cached_step(
                     existing_step = s
                 break
 
-    if not existing_step or not existing_step.explanation_markdown or len(existing_step.explanation_markdown.strip()) <= 50:
+    if not existing_step or not existing_step.explanation_markdown or not is_valid_complete_step(existing_step.explanation_markdown):
         raise HTTPException(status_code=404, detail="Step not yet synthesized")
 
     if not deep_session:

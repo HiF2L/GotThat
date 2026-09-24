@@ -159,7 +159,9 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
           const targetCid = target || activeSess.current_concept_id;
           if (targetCid) {
-            const cachedStep = await apiClient.getLessonStep(targetCid, activeSess.session_id);
+            const cachedStep =
+              activeSess.cached_step ||
+              (await apiClient.getLessonStep(targetCid, activeSess.session_id));
             if (cachedStep) {
               setCurrentStep(cachedStep);
               loadedTargetRef.current = cachedStep.concept_id;
@@ -284,7 +286,13 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     }
 
     const currentDag = overrideDag || dagPlan;
-    const targetNode = currentDag?.nodes?.find((n) => n.id === conceptId || n.slug === conceptId);
+    const targetNode = currentDag?.nodes?.find(
+      (n: any) =>
+        n.id === conceptId ||
+        n.concept_id === conceptId ||
+        n.slug === conceptId ||
+        n.code === conceptId
+    );
     if (targetNode?.title) {
       setStreamingLessonTitle(targetNode.title);
     }
@@ -292,7 +300,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setLoading(true);
     setStreamingContent('');
     setStreamingThoughts('');
-    setLoadingMessage('Синтез урока в реальном времени...');
+    setLoadingMessage(targetNode?.title ? `Синтез урока: ${targetNode.title}...` : 'Синтез урока в реальном времени...');
 
     const currentSid = activeSessionId || sessionId || localStorage.getItem('got_it_active_session_id');
 
@@ -316,7 +324,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
         }
       }
 
-      if (currentSid && currentDag?.nodes?.some((n) => n.id === conceptId || n.slug === conceptId)) {
+      if (currentSid) {
         try {
           await apiClient.streamLessonStep(
             currentSid,
@@ -365,6 +373,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
         const sessionRes = await apiClient.startDeepSession(userId, conceptId, yapNote, language);
         if (sessionRes.session_id) {
           setSessionId(sessionRes.session_id);
+          localStorage.setItem('got_it_active_session_id', sessionRes.session_id);
           handleTutorActionResponse(sessionRes.initial_action, sessionRes.session_id);
         }
       }
@@ -602,40 +611,50 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   };
 
   const currentConceptIdx = dagPlan?.nodes?.findIndex(
-    (n) => n.id === currentStep?.concept_id || n.slug === currentStep?.concept_slug
+    (n: any) =>
+      n.id === currentStep?.concept_id ||
+      n.concept_id === currentStep?.concept_id ||
+      (currentStep?.concept_slug && n.slug === currentStep.concept_slug) ||
+      ((currentStep as any)?.concept_code && (n.code === (currentStep as any).concept_code || n.id === (currentStep as any).concept_code)) ||
+      ((currentStep as any)?.title && n.title === (currentStep as any).title)
   ) ?? -1;
 
+  const effectiveConceptIdx =
+    currentConceptIdx >= 0
+      ? currentConceptIdx
+      : (currentStep?.step_sequence ? Math.max(0, Math.min(currentStep.step_sequence - 1, (dagPlan?.nodes?.length || 1) - 1)) : -1);
+
   const nodes = dagPlan?.nodes || [];
-  const hasPrev = currentConceptIdx > 0;
-  const prevNode = hasPrev && dagPlan?.nodes ? dagPlan.nodes[currentConceptIdx - 1] : null;
+  const hasPrev = effectiveConceptIdx > 0;
+  const prevNode = hasPrev && dagPlan?.nodes ? dagPlan.nodes[effectiveConceptIdx - 1] : null;
 
   // Cyclic Gap Discovery: find the first unmastered node forward, or wrap-around from beginning
   const nextTargetNode = (() => {
     if (!nodes || nodes.length === 0) return null;
     // 1. Forward scan: look for first unmastered node ahead
-    if (currentConceptIdx >= 0) {
-      for (let i = currentConceptIdx + 1; i < nodes.length; i++) {
+    if (effectiveConceptIdx >= 0) {
+      for (let i = effectiveConceptIdx + 1; i < nodes.length; i++) {
         if (nodes[i].status !== 'completed') {
           return nodes[i];
         }
       }
     }
-    // 2. Wrap-around scan: check from start (0 .. currentConceptIdx)
-    const maxWrap = currentConceptIdx >= 0 ? currentConceptIdx : nodes.length;
+    // 2. Wrap-around scan: check from start (0 .. effectiveConceptIdx)
+    const maxWrap = effectiveConceptIdx >= 0 ? effectiveConceptIdx : nodes.length;
     for (let i = 0; i < maxWrap; i++) {
       if (nodes[i].status !== 'completed') {
         return nodes[i];
       }
     }
     // 3. If all nodes are already mastered, fall back to sequential next if available
-    if (currentConceptIdx >= 0 && currentConceptIdx + 1 < nodes.length) {
-      return nodes[currentConceptIdx + 1];
+    if (effectiveConceptIdx >= 0 && effectiveConceptIdx + 1 < nodes.length) {
+      return nodes[effectiveConceptIdx + 1];
     }
     return null;
   })();
 
-  const hasUnmasteredAnywhere = nodes.some((n, idx) => idx !== currentConceptIdx && n.status !== 'completed');
-  const hasNext = nodes.length > 1 && (currentConceptIdx < nodes.length - 1 || hasUnmasteredAnywhere);
+  const hasUnmasteredAnywhere = nodes.some((n, idx) => idx !== effectiveConceptIdx && n.status !== 'completed');
+  const hasNext = nodes.length > 1 && (effectiveConceptIdx < nodes.length - 1 || hasUnmasteredAnywhere);
   const nextNode = nextTargetNode;
 
   const handleProceedPrevStep = () => {
@@ -1102,9 +1121,15 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               <div className="flex items-center gap-2 overflow-x-auto py-1 scrollbar-none">
                 {(() => {
                   const nodes = dagPlan.nodes;
-                  const activeIdx = nodes.findIndex(
-                    (n) => n.id === currentStep?.concept_id || n.status === 'active'
-                  );
+                  const activeIdx =
+                    effectiveConceptIdx >= 0
+                      ? effectiveConceptIdx
+                      : nodes.findIndex(
+                          (n: any) =>
+                            n.id === currentStep?.concept_id ||
+                            n.concept_id === currentStep?.concept_id ||
+                            n.status === 'active'
+                        );
                   const targetIdx = activeIdx >= 0 ? activeIdx : 0;
                   const start = Math.max(0, targetIdx - 1);
                   const end = Math.min(nodes.length, start + 4);
@@ -1113,9 +1138,11 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
                   return visibleNodes.map((node, i) => {
                     const isCurrent =
-                      node.id === currentStep?.concept_id ||
-                      (activeIdx === -1 && i === 0) ||
-                      node.status === 'active';
+                      effectiveConceptIdx >= 0
+                        ? nodes.indexOf(node) === effectiveConceptIdx
+                        : node.id === currentStep?.concept_id ||
+                          (activeIdx === -1 && i === 0) ||
+                          node.status === 'active';
                     const isDone = node.status === 'completed' && !isCurrent;
 
                     return (
