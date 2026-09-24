@@ -14,7 +14,7 @@ def test_model_name_normalization():
 
     # 3. Shorthand aliases
     assert ai_clients.normalize_model_name("kimi") == "moonshotai/kimi-k3"
-    assert ai_clients.normalize_model_name("claude") == "anthropic/claude-sonnet-4-5"
+    assert ai_clients.normalize_model_name("claude") == "anthropic/claude-sonnet-5"
     assert ai_clients.normalize_model_name("deepseek") == "deepseek/deepseek-chat"
     assert ai_clients.normalize_model_name("gpt") == "openai/gpt-4.1-mini"
 

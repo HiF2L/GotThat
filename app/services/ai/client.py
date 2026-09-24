@@ -3,7 +3,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Dict, Any, Optional, List, AsyncGenerator
+from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from openai import AsyncOpenAI
 from app.config import settings
 from app.services.ai.cost_tracker import cost_tracker
@@ -226,10 +226,133 @@ class ReasoningStreamFilter:
         return "".join(token for ev_type, token in events if ev_type == "content")
 
 
+class StreamingQuizFilter:
+    """
+    Streaming lookahead filter that reliably intercepts the quiz boundary
+    even when delimiter tokens like '---QUIZ_JSON---' are fragmented across arbitrary chunks.
+    Ensures that zero delimiter or JSON tokens are ever leaked to the student.
+    """
+    DELIM_REGEX = re.compile(r'(?i)(?:\n\s*)?---+[\s_]*quiz(?:[\s_]*json)?[\s_]*-*', re.MULTILINE)
+
+    def __init__(self):
+        self.in_quiz = False
+        self.buffer = ""
+        self.quiz_buffer = ""
+
+    @staticmethod
+    def _find_potential_prefix_length(buf: str) -> int:
+        """
+        Finds the length of any trailing substring in buf that could be the prefix
+        of a quiz delimiter ('---QUIZ...', '\n---QUIZ...', '--- QUIZ JSON ---', etc.).
+        """
+        max_check = min(len(buf), 40)
+        for i in range(max_check, 0, -1):
+            tail = buf[-i:]
+            clean = tail.strip().lower()
+            if not clean:
+                if tail.startswith("\n") or tail.startswith("\r"):
+                    return i
+                continue
+            if clean.startswith("-"):
+                norm = re.sub(r"[\s_\-]+", "", clean)
+                if not norm:
+                    return i
+                if "quizjson".startswith(norm) or "quiz".startswith(norm):
+                    return i
+        return 0
+
+    def process_chunk(self, chunk: str) -> List[Tuple[str, str]]:
+        if not chunk:
+            return []
+        if self.in_quiz:
+            self.quiz_buffer += chunk
+            return []
+
+        self.buffer += chunk
+        m = self.DELIM_REGEX.search(self.buffer)
+        if m:
+            content_part = self.buffer[:m.start()]
+            quiz_part = self.buffer[m.end():]
+            self.buffer = ""
+            self.in_quiz = True
+            self.quiz_buffer += quiz_part
+            return [("content", content_part)] if content_part else []
+
+        prefix_len = self._find_potential_prefix_length(self.buffer)
+        if prefix_len > 0:
+            if prefix_len < len(self.buffer):
+                to_yield = self.buffer[:-prefix_len]
+                self.buffer = self.buffer[-prefix_len:]
+                return [("content", to_yield)] if to_yield else []
+            else:
+                return []
+        else:
+            to_yield = self.buffer
+            self.buffer = ""
+            return [("content", to_yield)] if to_yield else []
+
+    def flush(self) -> List[Tuple[str, str]]:
+        if not self.in_quiz and self.buffer:
+            res = [("content", self.buffer)]
+            self.buffer = ""
+            return res
+        return []
+
+
+def extract_quiz_and_prose(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """
+    Universally separates and cleans pedagogical tutorial markdown from any embedded or trailing
+    quiz JSON payloads. Returns (cleaned_prose_markdown, parsed_quiz_dict_or_none).
+    """
+    if not text:
+        return "", None
+
+    cleaned = text.strip()
+    quiz_obj = None
+
+    # Pattern 1: Explicit delimiter (---QUIZ_JSON---, ---QUIZ---, etc.)
+    delim_pattern = re.compile(r'(?i)(?:\n\s*)?---+[\s_]*quiz(?:[\s_]*json)?[\s_]*-*', re.MULTILINE)
+    m = delim_pattern.search(cleaned)
+    if m:
+        prose_candidate = cleaned[:m.start()].strip()
+        quiz_tail = cleaned[m.end():].strip()
+        if quiz_tail.startswith("```"):
+            quiz_tail = re.sub(r"^```(?:json)?\s*", "", quiz_tail)
+            quiz_tail = re.sub(r"\s*```$", "", quiz_tail)
+        parsed = extract_json_or_fallback(quiz_tail)
+        if isinstance(parsed, dict) and ("options" in parsed or "choices" in parsed or "prompt" in parsed or "question" in parsed):
+            quiz_obj = parsed
+        return prose_candidate, quiz_obj
+
+    # Pattern 2: Trailing code block containing quiz JSON: ```json { "prompt": ... } ```
+    trailing_fence_pattern = re.compile(r'(?ms)(?:\n\s*)?```(?:json)?\s*(\{\s*"(?:prompt|question)".*?\}|\{\s*"options".*?\})\s*```\s*$')
+    m_fence = trailing_fence_pattern.search(cleaned)
+    if m_fence:
+        parsed = extract_json_or_fallback(m_fence.group(1))
+        if isinstance(parsed, dict) and ("options" in parsed or "choices" in parsed or "prompt" in parsed or "question" in parsed):
+            return cleaned[:m_fence.start()].strip(), parsed
+
+    # Pattern 3: Trailing raw JSON object: { "prompt": ..., "options": [...] }
+    last_brace = cleaned.rfind("}")
+    if last_brace != -1 and last_brace >= len(cleaned) - 10:
+        open_candidates = [m.start() for m in re.finditer(r'(?m)^\{\s*"(?:prompt|question)"', cleaned)]
+        if not open_candidates:
+            open_candidates = [m.start() for m in re.finditer(r'\{\s*"(?:prompt|question)"', cleaned)]
+        if open_candidates:
+            best_open = open_candidates[-1]
+            candidate_json = cleaned[best_open:last_brace+1]
+            parsed = extract_json_or_fallback(candidate_json)
+            if isinstance(parsed, dict) and ("options" in parsed or "choices" in parsed or "prompt" in parsed or "question" in parsed):
+                return cleaned[:best_open].strip(), parsed
+
+    return cleaned, None
+
+
 def sanitize_markdown_text(text: str) -> str:
     """
     Guarantees that a markdown text payload is never inadvertently a raw JSON string
-    or escaped JSON dump, and cleanly strips all internal model thinking tags.
+    or escaped JSON dump, cleanly strips all internal model thinking tags,
+    and guarantees zero quiz JSON leakage into the tutorial prose.
     """
     if not text:
         return ""
@@ -237,6 +360,9 @@ def sanitize_markdown_text(text: str) -> str:
     cleaned = text.strip()
     # 0. Strip reasoning / chain of thought blocks first
     cleaned = strip_reasoning_tags(cleaned)
+
+    # 1. Strip any embedded or trailing quiz JSON payloads
+    cleaned, _ = extract_quiz_and_prose(cleaned)
 
     if (cleaned.startswith("{") or cleaned.startswith("```json") or cleaned.startswith("```")) and (
         '"explanation_markdown"' in cleaned or '"explanation"' in cleaned
@@ -257,8 +383,9 @@ def sanitize_markdown_text(text: str) -> str:
     if "\\n" in cleaned and "\n" not in cleaned:
         cleaned = cleaned.replace("\\n", "\n")
 
-    # Clean once more in case stripped json had reasoning tags inside
+    # Clean once more in case stripped json had reasoning tags inside or quiz markers
     cleaned = strip_reasoning_tags(cleaned)
+    cleaned, _ = extract_quiz_and_prose(cleaned)
 
     # Strip conversational meta-preamble before the first markdown header
     # e.g. "Okay, I understand...", "Here is the tutorial:", "Plan: 1. ...", etc.

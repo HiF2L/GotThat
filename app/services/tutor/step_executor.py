@@ -33,7 +33,11 @@ def is_valid_complete_step(explanation: Optional[str]) -> bool:
     """
     if not explanation or len(explanation.strip()) < 100:
         return False
-    cleaned = explanation.strip()
+    from app.services.ai.client import extract_quiz_and_prose
+    cleaned_prose, _ = extract_quiz_and_prose(explanation)
+    cleaned = cleaned_prose.strip()
+    if not cleaned or len(cleaned) < 100:
+        return False
     # Check if ends abruptly with unclosed word, dangling hyphen, unfinished bold or quote
     if cleaned.endswith(("-", "—", "**", "*", "`", "«", "...", " и", " но", " что", " или", " для", " при")):
         return False
@@ -43,7 +47,7 @@ def is_valid_complete_step(explanation: Optional[str]) -> bool:
         if last_line.count("«") > last_line.count("»") or last_line.count("**") % 2 != 0:
             return False
         # Sentence cut-off detection
-        if not last_line.endswith((".", "!", "?", "»", '"', ")", "```", "$$", ":", "---", "}")):
+        if not last_line.endswith((".", "!", "?", "»", '"', ")", "```", "$$", ":", "---")):
             return False
     return True
 
@@ -154,11 +158,41 @@ class StepExecutor:
                 allow_voice=v_data.get("allow_voice", True),
             )
 
+        from app.services.ai.client import sanitize_markdown_text, extract_quiz_and_prose
+        cleaned_md, extracted_quiz = extract_quiz_and_prose(step.explanation_markdown or "")
+        exp_md = sanitize_markdown_text(cleaned_md)
+
+        # Check if stored v_challenge was a dummy fallback, but explanation contained the real model quiz
+        is_fallback_quiz = False
+        if v_challenge:
+            p_text = v_challenge.prompt_markdown or ""
+            if "Какое главное следствие вытекает из концепции" in p_text or len(v_challenge.options) <= 2:
+                if any("Полное отсутствие практической применимости" in (o.text or "") for o in v_challenge.options):
+                    is_fallback_quiz = True
+
+        if (not v_challenge or is_fallback_quiz) and extracted_quiz and isinstance(extracted_quiz, dict):
+            raw_opts = extracted_quiz.get("options") or extracted_quiz.get("choices") or []
+            if len(raw_opts) >= 2:
+                real_opts = [
+                    QuizOption(
+                        id=str(o.get("id", "a")),
+                        text=str(o.get("text", "")),
+                        is_correct=bool(o.get("is_correct", False)),
+                        explanation=str(o.get("explanation", "")),
+                    )
+                    for o in raw_opts if isinstance(o, dict)
+                ]
+                if len(real_opts) >= 2:
+                    p_text = extracted_quiz.get("prompt") or extracted_quiz.get("question") or f"Проверка понимания: {concept.title}"
+                    v_challenge = VerificationChallengeSchema(
+                        item_id=f"lock_{step.concept_id}_{effective_sequence}",
+                        prompt_markdown=p_text,
+                        options=real_opts,
+                        allow_voice=True,
+                    )
+
         from app.core.slug import generate_slug
         c_slug = concept.slug or generate_slug(concept.title)
-
-        from app.services.ai.client import sanitize_markdown_text
-        exp_md = sanitize_markdown_text(step.explanation_markdown or "")
 
         return DeepStepPayload(
             session_id=deep_session.id,
@@ -843,12 +877,12 @@ class StepExecutor:
             else:
                 explanation = raw_chat_resp.strip()
 
-        # Bulletproof check: Guarantee explanation is never a raw JSON dump
-        from app.services.ai.client import sanitize_markdown_text
-        explanation = sanitize_markdown_text(explanation or "").strip()
-        clean_exp = explanation
+        # Bulletproof check: Guarantee explanation is never a raw JSON dump or contains leaked quiz JSON
+        from app.services.ai.client import sanitize_markdown_text, extract_quiz_and_prose, extract_json_or_fallback
+        cleaned_prose, embedded_quiz = extract_quiz_and_prose(explanation or "")
+        clean_exp = sanitize_markdown_text(cleaned_prose).strip()
+        explanation = clean_exp
         if (clean_exp.startswith("{") and '"explanation' in clean_exp) or (clean_exp.startswith("```json") and '"explanation' in clean_exp):
-            from app.services.ai.client import extract_json_or_fallback
             extracted_obj = extract_json_or_fallback(clean_exp)
             if extracted_obj and isinstance(extracted_obj, dict):
                 if extracted_obj.get("explanation_markdown"):
@@ -870,8 +904,9 @@ class StepExecutor:
             llm_response.get("verification_question")
             or llm_response.get("verification_challenge")
             or llm_response.get("quiz")
+            or embedded_quiz
             or {}
-        ) if isinstance(llm_response, dict) else {}
+        ) if isinstance(llm_response, dict) else (embedded_quiz or {})
 
         # 3, 4 & 5. Run Subagents in Parallel: Fact-Check, SVG Visualizer, and Real Internet Image Finder
         # 3 & 4. Primary Visual Pipeline: Check authentic images first (0 API tokens, fast <0.5s HTTP lookup)
@@ -1410,8 +1445,8 @@ class StepExecutor:
         ]
 
         full_prose_parts: List[str] = []
-        quiz_buffer_parts: List[str] = []
-        in_quiz_section = False
+        from app.services.ai.client import StreamingQuizFilter, sanitize_markdown_text, extract_json_or_fallback, extract_quiz_and_prose
+        quiz_filter = StreamingQuizFilter()
 
         async for ev in ai_clients.generate_chat_stream_events(
             messages=messages,
@@ -1425,34 +1460,36 @@ class StepExecutor:
                 continue
 
             chunk = ev.get("token", "")
-            if "---QUIZ_JSON---" in chunk or "---QUIZ" in chunk:
-                in_quiz_section = True
-                split_parts = chunk.split("---QUIZ", 1)
-                if split_parts[0]:
-                    full_prose_parts.append(split_parts[0])
-                    yield {"type": "token", "token": split_parts[0]}
-                if len(split_parts) > 1:
-                    quiz_buffer_parts.append(split_parts[1])
-                continue
+            events = quiz_filter.process_chunk(chunk)
+            for ev_type, text in events:
+                if ev_type == "content":
+                    full_prose_parts.append(text)
+                    yield {"type": "token", "token": text}
 
-            if in_quiz_section:
-                quiz_buffer_parts.append(chunk)
-            else:
-                full_prose_parts.append(chunk)
-                yield {"type": "token", "token": chunk}
+        for ev_type, text in quiz_filter.flush():
+            if ev_type == "content":
+                full_prose_parts.append(text)
+                yield {"type": "token", "token": text}
 
-        explanation = "".join(full_prose_parts).strip()
-        from app.services.ai.client import sanitize_markdown_text, extract_json_or_fallback
-        explanation = sanitize_markdown_text(explanation)
+        raw_prose = "".join(full_prose_parts).strip()
+        cleaned_prose, fallback_quiz = extract_quiz_and_prose(raw_prose)
+        explanation = sanitize_markdown_text(cleaned_prose)
         if not explanation:
             explanation = f"### {concept.title}\n\n{concept.summary}"
 
-        # Parse Quiz
-        quiz_raw = "".join(quiz_buffer_parts).strip()
-        quiz_obj = extract_json_or_fallback(quiz_raw)
+        # Parse Quiz: from streaming buffer first, then from any quiz extracted from prose
+        quiz_obj = None
+        quiz_raw = quiz_filter.quiz_buffer.strip()
+        if quiz_raw:
+            quiz_obj = extract_json_or_fallback(quiz_raw)
+            if not isinstance(quiz_obj, dict) or not ("options" in quiz_obj or "choices" in quiz_obj or "prompt" in quiz_obj or "question" in quiz_obj):
+                quiz_obj = None
+        if not quiz_obj and fallback_quiz:
+            quiz_obj = fallback_quiz
+
         opts = []
         if quiz_obj and isinstance(quiz_obj, dict):
-            raw_opts = quiz_obj.get("options") or []
+            raw_opts = quiz_obj.get("options") or quiz_obj.get("choices") or []
             for o in raw_opts:
                 if isinstance(o, dict):
                     opts.append(
@@ -1471,7 +1508,7 @@ class StepExecutor:
                 QuizOption(id="b", text="Полное отсутствие практической применимости", is_correct=False, explanation="Неверно"),
             ]
         else:
-            prompt_text = quiz_obj.get("prompt") or f"Проверка понимания: {concept.title}"
+            prompt_text = quiz_obj.get("prompt") or quiz_obj.get("question") or f"Проверка понимания: {concept.title}"
 
         v_challenge = VerificationChallengeSchema(
             item_id=f"lock_{concept.id}_{step_sequence}",
