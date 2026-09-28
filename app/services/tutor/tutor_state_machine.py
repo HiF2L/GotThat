@@ -1,5 +1,6 @@
 import logging
 import copy
+import uuid
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime
 from fastapi import HTTPException
@@ -377,6 +378,20 @@ class TutorStateMachine:
                 track_concepts = tc_res.scalars().all()
                 if track_concepts:
                     target_concept = track_concepts[-1]
+                else:
+                    from app.core.slug import generate_slug
+                    root_concept = Concept(
+                        id=str(uuid.uuid4()),
+                        track_id=track_match.id,
+                        slug=track_match.slug or generate_slug(track_match.title),
+                        code=f"GOAL_{uuid.uuid4().hex[:4]}",
+                        title=track_match.title,
+                        summary=track_match.description or f"Курс: {track_match.title}",
+                        bloom_level="evaluate",
+                    )
+                    session.add(root_concept)
+                    await session.flush()
+                    target_concept = root_concept
             else:
                 # Check if it matches a specific Concept
                 c_res = await session.execute(
@@ -391,6 +406,24 @@ class TutorStateMachine:
                 target_concept = c_res.scalars().first()
                 if target_concept:
                     specific_concept_id = target_concept.id
+
+        if not target_concept:
+            if request.target_concept_id:
+                # User asked for a specific topic/track that doesn't exist yet! Auto-register track cleanly
+                from app.services.graph.dynamic_curriculum import curriculum_generator
+                new_track = await curriculum_generator.generate_curriculum(
+                    session=session,
+                    user_id=user_id,
+                    topic_query=request.target_concept_id,
+                    depth_level=request.depth_level or "high",
+                )
+                tc_res = await session.execute(
+                    select(Concept).where(Concept.track_id == new_track.id)
+                )
+                track_concepts = tc_res.scalars().all()
+                if track_concepts:
+                    target_concept = track_concepts[-1]
+                    is_track_level_request = True
 
         if not target_concept:
             c_res = await session.execute(select(Concept).limit(1))

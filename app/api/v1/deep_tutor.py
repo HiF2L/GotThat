@@ -17,7 +17,7 @@ from app.schemas.tutor import (
 from app.services.tutor.tutor_state_machine import tutor_state_machine
 from app.services.tutor.step_executor import step_executor
 from app.models.session import DeepLearningSession, DeepSessionStep
-from app.models.ontology import Concept
+from app.models.ontology import Concept, Track
 from app.models.mastery import User
 from app.config import settings
 from app.services.ai.client import ai_clients
@@ -40,22 +40,14 @@ async def get_active_session(
     """
     Returns the user's ongoing DeepLearningSession to instantly restore state on reload.
     Supports resolving session by:
-    1. Direct session_id
-    2. Target concept step lookup (finds the exact session containing this concept)
+    1. Direct session_id (strictly validated against target_concept_id if provided)
+    2. Target concept/track step lookup (finds the exact session containing this course's concepts)
     3. Target concept track / session match
     4. User resolution (by User.id or User.username, with graceful fallback)
-    Also embeds cached_step if available to allow single-trip instant UI hydration.
+    NOTE: If target_concept_id is specified and does NOT have an active session, returns 404
+    so that a new course can be generated, rather than falsely hijacking an unrelated course!
     """
-    sess = None
-
-    # 1. Direct session ID lookup if provided
-    if session_id:
-        s_res = await db.execute(
-            select(DeepLearningSession).where(DeepLearningSession.id == session_id)
-        )
-        sess = s_res.scalars().first()
-
-    # 2. Resolve user entity (supports UUID, username, or fallback to first user)
+    # 1. Resolve user entity (supports UUID, username, or fallback to first user)
     effective_user_id = user_id
     u_res = await db.execute(
         select(User).where(or_(User.id == user_id, User.username == user_id))
@@ -68,86 +60,120 @@ async def get_active_session(
         if first_user:
             effective_user_id = first_user.id
 
+    # 2. Resolve target track / concept
+    target_track = None
     target_concept = None
-    if not sess and target_concept_id:
-        c_res = await db.execute(
-            select(Concept).where(
-                or_(
-                    Concept.id == target_concept_id,
-                    Concept.slug == target_concept_id,
-                    Concept.code == target_concept_id,
-                )
+    track_cids = []
+
+    if target_concept_id:
+        t_res = await db.execute(
+            select(Track).where(
+                or_(Track.id == target_concept_id, Track.slug == target_concept_id)
             )
         )
-        target_concept = c_res.scalars().first()
-
-        # 3. Check if any session already has a generated step for this concept!
-        if target_concept:
-            step_sess_res = await db.execute(
-                select(DeepLearningSession)
-                .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
-                .where(
-                    and_(
-                        DeepLearningSession.user_id == effective_user_id,
-                        DeepSessionStep.concept_id == target_concept.id,
+        target_track = t_res.scalars().first()
+        if target_track:
+            track_concepts_res = await db.execute(
+                select(Concept).where(Concept.track_id == target_track.id)
+            )
+            track_concepts = track_concepts_res.scalars().all()
+            track_cids = [c.id for c in track_concepts]
+            if track_concepts:
+                target_concept = track_concepts[-1]
+        else:
+            c_res = await db.execute(
+                select(Concept).where(
+                    or_(
+                        Concept.id == target_concept_id,
+                        Concept.slug == target_concept_id,
+                        Concept.code == target_concept_id,
                     )
                 )
-                .order_by(DeepSessionStep.created_at.desc())
             )
-            sess = step_sess_res.scalars().first()
-            if not sess:
-                # Fallback without user_id restriction
-                step_sess_res = await db.execute(
-                    select(DeepLearningSession)
-                    .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
-                    .where(DeepSessionStep.concept_id == target_concept.id)
-                    .order_by(DeepSessionStep.created_at.desc())
-                )
-                sess = step_sess_res.scalars().first()
-
-        # 4. Check track or target_concept_id on the session itself
-        if not sess:
-            query = select(DeepLearningSession).where(DeepLearningSession.user_id == effective_user_id)
+            target_concept = c_res.scalars().first()
             if target_concept and target_concept.track_id:
                 track_concepts_res = await db.execute(
                     select(Concept.id).where(Concept.track_id == target_concept.track_id)
                 )
-                track_cids = track_concepts_res.scalars().all()
-                query = query.where(
-                    or_(
-                        DeepLearningSession.target_concept_id == target_concept.id,
-                        DeepLearningSession.target_concept_id.in_(track_cids),
-                    )
-                )
-            elif target_concept:
-                query = query.where(DeepLearningSession.target_concept_id == target_concept.id)
-            else:
-                query = query.where(DeepLearningSession.target_concept_id == target_concept_id)
+                track_cids = [c for c in track_concepts_res.scalars().all()]
 
-            query = query.order_by(DeepLearningSession.created_at.desc())
+    valid_target_ids = set(track_cids)
+    if target_concept:
+        valid_target_ids.add(target_concept.id)
+    if target_concept_id:
+        valid_target_ids.add(target_concept_id)
+
+    sess = None
+
+    # 3. Direct session ID lookup if provided (ONLY accepted if it matches requested target!)
+    if session_id:
+        s_res = await db.execute(
+            select(DeepLearningSession).where(DeepLearningSession.id == session_id)
+        )
+        candidate_sess = s_res.scalars().first()
+        if candidate_sess:
+            if target_concept_id:
+                is_match = False
+                if candidate_sess.target_concept_id in valid_target_ids:
+                    is_match = True
+                elif candidate_sess.planned_dag and candidate_sess.planned_dag.get("nodes"):
+                    for n in candidate_sess.planned_dag["nodes"]:
+                        nid = n.get("id") or n.get("concept_id") or n.get("slug")
+                        if nid and (nid in valid_target_ids or (target_track and n.get("track_id") == target_track.id)):
+                            is_match = True
+                            break
+                if is_match:
+                    sess = candidate_sess
+                else:
+                    logger.info(
+                        f"Session {session_id} target does not match requested target {target_concept_id}. Ignoring stale session_id."
+                    )
+            else:
+                sess = candidate_sess
+
+    # 4. Check if any session already has steps or targets for this specific course/track
+    if not sess and target_concept_id and valid_target_ids:
+        # Check by generated step
+        step_sess_res = await db.execute(
+            select(DeepLearningSession)
+            .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
+            .where(
+                and_(
+                    DeepLearningSession.user_id == effective_user_id,
+                    DeepSessionStep.concept_id.in_(valid_target_ids),
+                )
+            )
+            .order_by(DeepSessionStep.created_at.desc())
+        )
+        sess = step_sess_res.scalars().first()
+
+        if not sess:
+            step_sess_res = await db.execute(
+                select(DeepLearningSession)
+                .join(DeepSessionStep, DeepSessionStep.session_id == DeepLearningSession.id)
+                .where(DeepSessionStep.concept_id.in_(valid_target_ids))
+                .order_by(DeepSessionStep.created_at.desc())
+            )
+            sess = step_sess_res.scalars().first()
+
+        # Check by target_concept_id on the session itself
+        if not sess:
+            query = select(DeepLearningSession).where(
+                and_(
+                    DeepLearningSession.user_id == effective_user_id,
+                    DeepLearningSession.target_concept_id.in_(valid_target_ids),
+                )
+            ).order_by(DeepLearningSession.created_at.desc())
             sess = (await db.execute(query)).scalars().first()
 
-            if not sess and target_concept:
-                # Fallback without user_id restriction
-                fb_query = select(DeepLearningSession)
-                if target_concept.track_id:
-                    track_concepts_res = await db.execute(
-                        select(Concept.id).where(Concept.track_id == target_concept.track_id)
-                    )
-                    track_cids = track_concepts_res.scalars().all()
-                    fb_query = fb_query.where(
-                        or_(
-                            DeepLearningSession.target_concept_id == target_concept.id,
-                            DeepLearningSession.target_concept_id.in_(track_cids),
-                        )
-                    )
-                else:
-                    fb_query = fb_query.where(DeepLearningSession.target_concept_id == target_concept.id)
-                fb_query = fb_query.order_by(DeepLearningSession.created_at.desc())
+            if not sess:
+                fb_query = select(DeepLearningSession).where(
+                    DeepLearningSession.target_concept_id.in_(valid_target_ids)
+                ).order_by(DeepLearningSession.created_at.desc())
                 sess = (await db.execute(fb_query)).scalars().first()
 
-    # 5. Fallback: latest session for user
-    if not sess:
+    # 5. Fallback: ONLY IF target_concept_id was NOT provided (i.e. user opened generic /deep tab)
+    if not sess and not target_concept_id:
         latest_res = await db.execute(
             select(DeepLearningSession)
             .where(DeepLearningSession.user_id == effective_user_id)
@@ -159,9 +185,16 @@ async def get_active_session(
         raise HTTPException(status_code=404, detail="No active session found")
 
     # 6. Try embedding the target or current lesson step for instant 0-latency UI hydration
+    # CRITICAL: ONLY check steps that actually belong to THIS session and course!
     cached_step_dict = None
-    cid_to_check = (target_concept.id if target_concept else None) or sess.current_concept_id
-    if cid_to_check:
+    cids_to_try = []
+    if target_concept:
+        cids_to_try.append(target_concept.id)
+    if sess.current_concept_id and sess.current_concept_id not in cids_to_try:
+        if not target_concept_id or (sess.current_concept_id in valid_target_ids):
+            cids_to_try.append(sess.current_concept_id)
+
+    for cid_to_check in cids_to_try:
         step_res = await db.execute(
             select(DeepSessionStep)
             .where(
@@ -175,14 +208,14 @@ async def get_active_session(
         )
         for s in step_res.scalars().all():
             if s.explanation_markdown and is_valid_complete_step(s.explanation_markdown):
-                c_step = target_concept
-                if not c_step or c_step.id != s.concept_id:
-                    c_step = (await db.execute(select(Concept).where(Concept.id == s.concept_id))).scalars().first()
+                c_step = (await db.execute(select(Concept).where(Concept.id == s.concept_id))).scalars().first()
                 if c_step:
                     seq = s.step_sequence or (sess.current_concept_index + 1)
                     payload = step_executor._build_step_payload_from_db(s, c_step, sess, seq)
                     cached_step_dict = payload.model_dump()
                 break
+        if cached_step_dict:
+            break
 
     return {
         "session_id": sess.id,

@@ -127,6 +127,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   const startSession = async (conceptId?: string, overrideSkipProbing?: boolean) => {
     if (isStartingSessionRef.current) return;
     isStartingSessionRef.current = true;
+    setSessionId(null);
     setProbeQuestion(null);
     setSelectedProbeOptionId(null);
     setCurrentStep(null); // CRITICAL: Reset step so old lesson never renders below probing test!
@@ -139,6 +140,7 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     try {
       const target = conceptId || targetConceptId || '';
       loadedTargetRef.current = target;
+      const targetKey = target ? target.toLowerCase().trim() : '';
       if (target) {
         localStorage.setItem('got_it_deep_concept_id', target);
       }
@@ -149,10 +151,15 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
       // 0. Fast-path active session & cached step restoration on reload
       try {
-        const savedSessionId = localStorage.getItem('got_it_active_session_id') || undefined;
+        const savedSessionId = targetKey
+          ? localStorage.getItem(`got_it_session_${targetKey}`) || undefined
+          : localStorage.getItem('got_it_active_session_id') || undefined;
         const activeSess = await apiClient.getActiveSession(userId, target, savedSessionId);
         if (activeSess && activeSess.status === 'teaching' && activeSess.planned_dag) {
           setSessionId(activeSess.session_id);
+          if (targetKey) {
+            localStorage.setItem(`got_it_session_${targetKey}`, activeSess.session_id);
+          }
           localStorage.setItem('got_it_active_session_id', activeSess.session_id);
           setDagPlan(activeSess.planned_dag);
           setCurrentPhase('teaching');
@@ -203,6 +210,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             },
             onPlanReady: (p) => {
               setSessionId(p.sessionId);
+              if (targetKey) {
+                localStorage.setItem(`got_it_session_${targetKey}`, p.sessionId);
+              }
+              localStorage.setItem('got_it_active_session_id', p.sessionId);
               setDagPlan(p.dag);
               setCurrentPhase('teaching');
             },
@@ -237,6 +248,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
                 .startDeepSession(userId, target, yapNote, language, undefined, true)
                 .then((res) => {
                   setSessionId(res.session_id);
+                  if (targetKey) {
+                    localStorage.setItem(`got_it_session_${targetKey}`, res.session_id);
+                  }
+                  localStorage.setItem('got_it_active_session_id', res.session_id);
                   handleTutorActionResponse(res.initial_action, res.session_id);
                 })
                 .catch(() => {
@@ -259,6 +274,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
         false,
       );
       setSessionId(res.session_id);
+      if (targetKey) {
+        localStorage.setItem(`got_it_session_${targetKey}`, res.session_id);
+      }
+      localStorage.setItem('got_it_active_session_id', res.session_id);
       handleTutorActionResponse(res.initial_action, res.session_id);
     } catch (err: any) {
       console.error('Failed to start deep session:', err);
@@ -302,7 +321,13 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     setStreamingThoughts('');
     setLoadingMessage(targetNode?.title ? `Синтез урока: ${targetNode.title}...` : 'Синтез урока в реальном времени...');
 
-    const currentSid = activeSessionId || sessionId || localStorage.getItem('got_it_active_session_id');
+    const targetKey = targetConceptId ? targetConceptId.toLowerCase().trim() : '';
+    const nodeKey = conceptId ? conceptId.toLowerCase().trim() : '';
+    const currentSid =
+      activeSessionId ||
+      sessionId ||
+      (targetKey ? localStorage.getItem(`got_it_session_${targetKey}`) : null) ||
+      (nodeKey ? localStorage.getItem(`got_it_session_${nodeKey}`) : null);
 
     try {
       // 0. Fast-path check: Is this lesson already cached in SQLite?
@@ -373,6 +398,12 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
         const sessionRes = await apiClient.startDeepSession(userId, conceptId, yapNote, language);
         if (sessionRes.session_id) {
           setSessionId(sessionRes.session_id);
+          if (nodeKey) {
+            localStorage.setItem(`got_it_session_${nodeKey}`, sessionRes.session_id);
+          }
+          if (targetKey) {
+            localStorage.setItem(`got_it_session_${targetKey}`, sessionRes.session_id);
+          }
           localStorage.setItem('got_it_active_session_id', sessionRes.session_id);
           handleTutorActionResponse(sessionRes.initial_action, sessionRes.session_id);
         }
@@ -409,6 +440,10 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
           },
           onPlanReady: (p) => {
             setSessionId(p.sessionId);
+            if (target) {
+              localStorage.setItem(`got_it_session_${target.toLowerCase().trim()}`, p.sessionId);
+            }
+            localStorage.setItem('got_it_active_session_id', p.sessionId);
             setDagPlan(p.dag);
             setCurrentPhase('teaching');
           },
@@ -449,6 +484,9 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     if (!actionData) return;
     const phase = actionData.phase;
     const currentSid = activeSessionId || sessionId;
+    if (activeSessionId && activeSessionId !== sessionId) {
+      setSessionId(activeSessionId);
+    }
     setCurrentPhase(phase);
 
     if (phase === 'probing') {
