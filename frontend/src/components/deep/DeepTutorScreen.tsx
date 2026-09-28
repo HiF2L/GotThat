@@ -208,7 +208,20 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
           }
           localStorage.setItem('got_it_active_session_id', activeSess.session_id);
           setCurrentPhase('probing');
-          setLoading(false);
+          if (activeSess.probing_question) {
+            setProbeQuestion(activeSess.probing_question);
+            setLoading(false);
+          } else {
+            setLoading(true);
+            setLoadingMessage('Загрузка диагностического вопроса...');
+            try {
+              const action = await apiClient.getNextTutorAction(activeSess.session_id);
+              handleTutorActionResponse(action, activeSess.session_id);
+            } catch (actErr) {
+              console.error('Failed to get next tutor action:', actErr);
+              setLoading(false);
+            }
+          }
           isStartingSessionRef.current = false;
           return;
         }
@@ -920,6 +933,55 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
             >
               <Sparkles className="w-4 h-4 text-indigo-300" />
               <span>Пропустить тест и перейти к урокам</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* State: Diagnostic Profiling Recovery / Blank Screen Prevention */}
+      {currentPhase === 'probing' && !probeQuestion && !loading && (
+        <div className="bg-surface-900 border border-amber-500/40 p-8 sm:p-10 rounded-3xl shadow-xl text-center space-y-5 max-w-xl mx-auto w-full animate-fadeIn">
+          <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400">
+            <Sparkles className="w-7 h-7" />
+          </div>
+          <div className="space-y-2">
+            <h3 className="text-xl font-bold text-white">
+              Диагностическое профилирование
+            </h3>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed max-w-md mx-auto">
+              Оцените текущий уровень знаний перед началом изучения курса или перейдите сразу к учебным урокам.
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+            <button
+              onClick={() => {
+                const targetKey = targetConceptId ? targetConceptId.toLowerCase().trim() : '';
+                const sid = sessionId || (targetKey ? localStorage.getItem(`got_it_session_${targetKey}`) : null) || localStorage.getItem('got_it_active_session_id');
+                if (sid) {
+                  requestNextAction(sid);
+                } else {
+                  startSession(targetConceptId, false);
+                }
+              }}
+              className="w-full sm:w-auto px-6 py-3 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs sm:text-sm rounded-xl transition-all shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Play className="w-4 h-4 fill-white" />
+              <span>Начать диагностику</span>
+            </button>
+            <button
+              onClick={() => {
+                const targetKey = targetConceptId ? targetConceptId.toLowerCase().trim() : '';
+                const sid = sessionId || (targetKey ? localStorage.getItem(`got_it_session_${targetKey}`) : null) || localStorage.getItem('got_it_active_session_id');
+                if (sid) {
+                  streamSessionPlan(sid);
+                } else {
+                  startSession(targetConceptId, true);
+                }
+              }}
+              className="w-full sm:w-auto px-6 py-3 bg-surface-800 hover:bg-surface-750 text-slate-300 hover:text-white font-semibold text-xs sm:text-sm rounded-xl border border-slate-700 transition-all flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-indigo-400" />
+              <span>Сразу к урокам без теста</span>
             </button>
           </div>
         </div>

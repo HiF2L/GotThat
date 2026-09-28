@@ -630,6 +630,23 @@ class AIClientManager:
 
         return kwargs
 
+    def _resolve_fallback_model(self, chosen_model: str) -> Optional[str]:
+        """
+        Determines the most suitable distinct fallback model:
+        Prioritizes fast & reliable instruction models over the primary model.
+        Never returns chosen_model.
+        """
+        candidates = [
+            self.normalize_model_name(settings.PLAN_MODEL),
+            self.normalize_model_name(settings.FAST_MODEL),
+            "google/gemini-2.5-flash",
+            "openai/gpt-4.1-mini",
+        ]
+        for cand in candidates:
+            if cand and cand != chosen_model:
+                return cand
+        return None
+
     async def generate_chat(
         self,
         messages: List[Dict[str, str]],
@@ -715,8 +732,8 @@ class AIClientManager:
                 error_message=f"Timeout after {call_timeout}s",
             )
             # Try single safe fast fallback so request does not fail
-            fallback_model = self.normalize_model_name(settings.FAST_MODEL)
-            if fallback_model != chosen_model:
+            fallback_model = self._resolve_fallback_model(chosen_model)
+            if fallback_model:
                 try:
                     fb_start = time.time()
                     fb_kwargs = self._prepare_kwargs(
@@ -758,8 +775,8 @@ class AIClientManager:
             logger.warning(f"Primary model '{chosen_model}' failed ({e}). Checking single safe fallback...")
 
             # If it was an invalid request or connection error on primary, try AT MOST ONE cheap fallback
-            fallback_model = self.normalize_model_name(settings.FAST_MODEL)
-            if fallback_model != chosen_model:
+            fallback_model = self._resolve_fallback_model(chosen_model)
+            if fallback_model:
                 try:
                     fb_start = time.time()
                     fb_kwargs = self._prepare_kwargs(

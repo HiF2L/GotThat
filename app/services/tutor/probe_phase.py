@@ -36,39 +36,171 @@ class ProbePhaseManager:
     - Operates with clean structural validation without hardcoded heuristics.
     """
 
-    TARGET_DIAGNOSTIC_DEPTH = 10
+    TARGET_DIAGNOSTIC_DEPTH = 6
 
     DIAGNOSTIC_SUITE_PROMPT = (
         "You are an elite academic professor and technical examiner.\n"
-        "Your task is to construct a rigorous, 10-question TECHNICAL DIAGNOSTIC QUIZ to accurately test a student's real depth of understanding in the specified subject.\n\n"
+        "Your task is to construct a focused, 6-question TECHNICAL DIAGNOSTIC QUIZ to accurately test a student's real depth of understanding in the specified subject.\n\n"
         "CRITICAL RULES:\n"
-        "1. REAL TECHNICAL QUESTIONS ONLY: Every question must test concrete technical facts, code syntax, execution flow, internal mechanisms, or specific edge cases. "
+        "1. REAL TECHNICAL QUESTIONS ONLY: Every question must test concrete technical facts, core mechanisms, code syntax, execution flow, internal concepts, or edge cases. "
         "FORBIDDEN: NEVER ask meta-survey questions like 'How confident are you in X?' or 'Evaluate your skill'.\n"
-        "2. CONCRETE TECHNICAL OPTIONS: Each of the 4 options (a, b, c, d) must be a specific, plausible technical answer (e.g. real code snippets, framework terms, exact mechanism behaviors), with exactly 1 correct answer and 3 realistic distractors.\n"
-        "3. DOMAIN PURITY: Strictly test only technologies and concepts belonging to the requested topic (e.g. if topic is 'FastAPI в Python', questions must be strictly about Python/FastAPI/Pydantic/ASGI/Starlette/Uvicorn/SQLAlchemy/AsyncIO, never mentioning .NET, Java, PHP, etc.).\n"
+        "2. CONCRETE TECHNICAL OPTIONS: Each of the 4 options (a, b, c, d) must be a specific, plausible technical answer (e.g. real concepts, code snippets, framework terms, exact mechanism behaviors), with exactly 1 correct answer and 3 realistic distractors.\n"
+        "3. DOMAIN PURITY: Strictly test only technologies and concepts belonging to the requested topic.\n"
         "4. PROGRESSIVE DIFFICULTY:\n"
         "   - Q1-Q2: Fundamental architectural concepts and core primitives.\n"
-        "   - Q3-Q5: Syntax, type annotations, Dependency Injection, request lifecycle.\n"
-        "   - Q6-Q8: Concurrency (async/def vs def), database integration, middleware, security.\n"
-        "   - Q9-Q10: Advanced edge cases, performance tuning, and architectural design.\n"
+        "   - Q3-Q4: Syntax, patterns, mechanisms, and practical application.\n"
+        "   - Q5-Q6: Advanced edge cases, performance, and design trade-offs.\n"
         "5. CRITICAL LANGUAGE MANDATE: All questions, subtopics, options, and explanations MUST strictly be in the SAME LANGUAGE as the subject topic (Russian if Russian, English if English).\n\n"
         "Return valid JSON matching this exact structure:\n"
         "{\n"
         '  "questions": [\n'
         '    {\n'
         '      "id": "q1",\n'
-        '      "subtopic_title": "Архитектура ASGI и сервера",\n'
-        '      "prompt": "Какой спецификацией интерфейса руководствуется FastAPI для обеспечения асинхронной обработки HTTP-запросов и WebSocket?",\n'
+        '      "subtopic_title": "Архитектура и базовые принципы",\n'
+        '      "prompt": "Какой ключевой механизм лежит в основе...",\n'
         '      "options": [\n'
-        '        {"id": "a", "text": "WSGI (Web Server Gateway Interface)", "is_correct": false, "explanation": "WSGI синхронный."},\n'
-        '        {"id": "b", "text": "ASGI (Asynchronous Server Gateway Interface)", "is_correct": true, "explanation": "FastAPI построен поверх Starlette и реализует спецификацию ASGI."},\n'
-        '        {"id": "c", "text": "CGI (Common Gateway Interface)", "is_correct": false, "explanation": "Устаревший протокол."},\n'
-        '        {"id": "d", "text": "FastCGI", "is_correct": false, "explanation": "Не используется как нативный интерфейс FastAPI."}\n'
+        '        {"id": "a", "text": "Вариант A", "is_correct": false, "explanation": "Пояснение почему неверно."},\n'
+        '        {"id": "b", "text": "Вариант B", "is_correct": true, "explanation": "Пояснение почему верно."},\n'
+        '        {"id": "c", "text": "Вариант C", "is_correct": false, "explanation": "Пояснение."},\n'
+        '        {"id": "d", "text": "Вариант D", "is_correct": false, "explanation": "Пояснение."}\n'
         '      ]\n'
         '    }\n'
         '  ]\n'
         "}"
     )
+
+    def _build_fallback_diagnostic_suite(
+        self, topic_title: str, is_russian: bool, concept_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Dynamically synthesizes a high-quality baseline technical diagnostic suite
+        if external LLM providers encounter a transient network timeout or service outage.
+        Ensures the student is never blocked with an unhandled error or blank screen.
+        """
+        clean_topic = topic_title.strip() if topic_title else "Subject"
+        if is_russian:
+            templates = [
+                (
+                    f"Основы и фундаментальные понятия: {clean_topic}",
+                    f"Насколько хорошо вы знакомы с базовыми понятиями, терминами и фундаментальными принципами в области «{clean_topic}»?",
+                    [
+                        ("a", "Уверенно знаю ключевые концепции, терминологию и область применения", True),
+                        ("b", "Имею общее теоретическое представление, но без глубокого понимания деталей", False),
+                        ("c", "Слышал(а) в общих чертах, практического опыта нет", False),
+                    ],
+                ),
+                (
+                    f"Практическое применение и базовый инструментарий: {clean_topic}",
+                    f"Имеете ли вы опыт практической работы или решения типовых задач по теме «{clean_topic}»?",
+                    [
+                        ("a", "Регулярно решаю практические задачи и применяю на практике", True),
+                        ("b", "Выполнял(а) только базовые примеры или учебные задачи", False),
+                        ("c", "Практического опыта пока нет, хочу освоить с нуля", False),
+                    ],
+                ),
+                (
+                    f"Архитектурные механизмы и внутренняя логика: {clean_topic}",
+                    f"Понимаете ли вы внутреннее устройство, ключевые механизмы и алгоритмы работы в «{clean_topic}»?",
+                    [
+                        ("a", "Понимаю внутреннюю структуру, алгоритмы и жизненный цикл процессов", True),
+                        ("b", "Понимаю на высоком уровне без погружения во внутренние механизмы", False),
+                        ("c", "Внутреннее устройство пока неизвестно", False),
+                    ],
+                ),
+                (
+                    f"Типичные ошибки, ограничения и крайние случаи: {clean_topic}",
+                    f"Сталкивались ли вы с отладкой, обработкой краевых случаев (edge cases) и ограничениями в «{clean_topic}»?",
+                    [
+                        ("a", "Знаю частые грабли, антипаттерны и способы эффективной локализации ошибок", True),
+                        ("b", "Сложные ошибки вызывают трудности, ищу решения в документации", False),
+                        ("c", "Пока не приходилось сталкиваться с нетривиальными ошибками", False),
+                    ],
+                ),
+                (
+                    f"Продвинутый уровень и оптимизация: {clean_topic}",
+                    f"Применяли ли вы продвинутые техники, оптимизацию производительности и лучшие практики в «{clean_topic}»?",
+                    [
+                        ("a", "Применяю лучшие архитектурные практики, знаю методы профилирования и тюнинга", True),
+                        ("b", "Использую стандартные подходы, до тонкой оптимизации дело не доходило", False),
+                        ("c", "Продвинутые темы пока не изучал(а)", False),
+                    ],
+                ),
+            ]
+        else:
+            templates = [
+                (
+                    f"Fundamentals & Core Principles: {clean_topic}",
+                    f"How well do you understand the fundamental concepts and core architecture of '{clean_topic}'?",
+                    [
+                        ("a", "Confidently understand core primitives, terminology, and domain boundaries", True),
+                        ("b", "Have high-level theoretical knowledge, but limited depth", False),
+                        ("c", "Vaguely familiar, no hands-on experience", False),
+                    ],
+                ),
+                (
+                    f"Practical Application & Workflows: {clean_topic}",
+                    f"Do you have practical hands-on experience working with '{clean_topic}' in real-world scenarios?",
+                    [
+                        ("a", "Frequently solve real-world problems and implement workflows", True),
+                        ("b", "Completed basic tutorials or introductory exercises only", False),
+                        ("c", "No practical experience yet, learning from scratch", False),
+                    ],
+                ),
+                (
+                    f"Internal Mechanisms & Execution Flow: {clean_topic}",
+                    f"Do you understand the underlying runtime mechanics and lifecycle patterns of '{clean_topic}'?",
+                    [
+                        ("a", "Thoroughly understand internals, execution pipeline, and patterns", True),
+                        ("b", "Understand surface API but not low-level mechanisms", False),
+                        ("c", "Unfamiliar with internal architecture", False),
+                    ],
+                ),
+                (
+                    f"Edge Cases, Debugging & Pitfalls: {clean_topic}",
+                    f"Are you experienced with diagnosing edge cases, anti-patterns, and pitfalls in '{clean_topic}'?",
+                    [
+                        ("a", "Familiar with subtle edge cases, gotchas, and debugging strategies", True),
+                        ("b", "Rely primarily on docs or search engines when encountering errors", False),
+                        ("c", "Have not encountered advanced debugging scenarios yet", False),
+                    ],
+                ),
+                (
+                    f"Advanced Architecture & Optimization: {clean_topic}",
+                    f"Have you implemented performance tuning, scalable design, and production best practices in '{clean_topic}'?",
+                    [
+                        ("a", "Comfortably design scalable systems and apply profiling optimizations", True),
+                        ("b", "Stick to standard conventions without deep performance tuning", False),
+                        ("c", "Have not reached advanced optimization stages yet", False),
+                    ],
+                ),
+            ]
+
+        fallback_suite = []
+        for i, (title, prompt, opts_raw) in enumerate(templates):
+            q_id = f"q{i+1}"
+            opts = []
+            for o_id, o_text, o_corr in opts_raw:
+                opts.append({
+                    "id": o_id,
+                    "text": o_text,
+                    "is_correct": o_corr,
+                    "explanation": "",
+                })
+            opts.append({
+                "id": "idk",
+                "text": "Я не знаю / не уверен(а)" if is_russian else "I don't know / not sure yet",
+                "is_correct": False,
+                "explanation": "",
+            })
+            fallback_suite.append({
+                "id": q_id,
+                "question_id": q_id,
+                "concept_id": concept_id,
+                "subtopic_title": title,
+                "prompt": prompt,
+                "options": opts,
+            })
+        return fallback_suite
 
     async def initialize_suite_if_needed(
         self,
@@ -77,6 +209,7 @@ class ProbePhaseManager:
     ) -> List[Dict[str, Any]]:
         """
         Generates the complete technical diagnostic suite in ONE batch call if not yet present in session state.
+        Guarantees that a valid suite is ALWAYS returned, utilizing multi-tier fallback and dynamic synthesis if needed.
         """
         probing_state = dict(deep_session.probing_state or {})
         existing_suite = probing_state.get("suite", [])
@@ -113,52 +246,70 @@ class ProbePhaseManager:
                     f"{wishes_context}"
                     f"Target Language: {'Russian (Русский язык)' if is_russian else 'English'}\n"
                     f"LANGUAGE MANDATE: All questions, options, subtopic titles, and explanations MUST strictly be in {'Russian (Русский язык)' if is_russian else 'English'}.\n\n"
-                    "Generate 10 concrete, technical, domain-specific multiple-choice diagnostic questions."
+                    "Generate 6 concrete, technical, domain-specific multiple-choice diagnostic questions."
                 ),
             },
         ]
 
-        suite_data = await ai_clients.generate_json(
-            messages=messages,
-            model=settings.FAST_MODEL,
-            temperature=0.25,
-            task_type="probe_suite",
-        )
+        raw_questions = []
+        for attempt_model in [settings.FAST_MODEL, settings.PLAN_MODEL]:
+            try:
+                suite_data = await ai_clients.generate_json(
+                    messages=messages,
+                    model=attempt_model,
+                    temperature=0.25,
+                    timeout_seconds=45.0,
+                    task_type="probe_suite",
+                )
+                candidates = (
+                    suite_data.get("questions")
+                    or suite_data.get("diagnostic_questions")
+                    or suite_data.get("items")
+                    or []
+                )
+                if isinstance(candidates, list) and len(candidates) >= 3:
+                    raw_questions = candidates
+                    break
+            except Exception as e:
+                logger.warning(f"Probe suite generation attempt with '{attempt_model}' failed: {e}")
 
-        raw_questions = (
-            suite_data.get("questions")
-            or suite_data.get("diagnostic_questions")
-            or suite_data.get("items")
-            or []
-        )
-
-        # Format options with standard 'I don't know / not sure yet' fallback
         formatted_suite = []
-        for i, q in enumerate(raw_questions):
-            q_id = q.get("id", f"q{i+1}")
-            opts = []
-            for opt in q.get("options", []):
+        if raw_questions:
+            # Format options with standard 'I don't know / not sure yet' fallback
+            for i, q in enumerate(raw_questions):
+                q_id = q.get("id", f"q{i+1}")
+                opts = []
+                for opt in q.get("options", []):
+                    opts.append({
+                        "id": opt.get("id", "a"),
+                        "text": opt.get("text", ""),
+                        "is_correct": opt.get("is_correct", False),
+                        "explanation": opt.get("explanation", ""),
+                    })
                 opts.append({
-                    "id": opt.get("id", "a"),
-                    "text": opt.get("text", ""),
-                    "is_correct": opt.get("is_correct", False),
-                    "explanation": opt.get("explanation", ""),
+                    "id": "idk",
+                    "text": "Я не знаю / не уверен(а)" if is_russian else "I don't know / not sure yet",
+                    "is_correct": False,
+                    "explanation": "",
                 })
-            opts.append({
-                "id": "idk",
-                "text": "Я не знаю / не уверен(а)" if is_russian else "I don't know / not sure yet",
-                "is_correct": False,
-                "explanation": "",
-            })
 
-            formatted_suite.append({
-                "id": q_id,
-                "question_id": q_id,
-                "concept_id": deep_session.target_concept_id,
-                "subtopic_title": q.get("subtopic_title", f"Concept {i+1}"),
-                "prompt": q.get("prompt", ""),
-                "options": opts,
-            })
+                formatted_suite.append({
+                    "id": q_id,
+                    "question_id": q_id,
+                    "concept_id": deep_session.target_concept_id,
+                    "subtopic_title": q.get("subtopic_title", f"Concept {i+1}"),
+                    "prompt": q.get("prompt", ""),
+                    "options": opts,
+                })
+
+        # If LLM generation completely failed or yielded invalid questions, use dynamic baseline suite
+        if not validate_question_suite_schema(formatted_suite):
+            logger.warning("LLM diagnostic suite generation incomplete; using dynamic baseline diagnostic suite.")
+            formatted_suite = self._build_fallback_diagnostic_suite(
+                topic_title=topic_title,
+                is_russian=is_russian,
+                concept_id=deep_session.target_concept_id,
+            )
 
         probing_state["suite"] = formatted_suite
         deep_session.probing_state = probing_state

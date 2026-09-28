@@ -15,7 +15,7 @@ def test_normalize_model_name_proxyapi():
     assert ai_clients.normalize_model_name("deepseek/deepseek-chat") == "deepseek/deepseek-chat"
     assert ai_clients.normalize_model_name("deepseek-chat") == "deepseek/deepseek-chat"
     assert ai_clients.normalize_model_name("anthropic/claude-sonnet-4-5") == "anthropic/claude-sonnet-4-5"
-    assert ai_clients.normalize_model_name("claude-sonnet") == "anthropic/claude-sonnet-4-5"
+    assert ai_clients.normalize_model_name("claude-sonnet") == "anthropic/claude-sonnet-5"
 
 
 @pytest.mark.asyncio

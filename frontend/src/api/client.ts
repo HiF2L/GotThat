@@ -145,7 +145,10 @@ export const apiClient = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) throw new Error('Failed to start deep session');
+    if (!res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.detail || `HTTP ${res.status}: Failed to start deep session`);
+    }
     return res.json();
   },
 
@@ -290,7 +293,10 @@ export const apiClient = {
         user_notes: userNotes,
       }),
     });
-    if (!res.ok) throw new Error('Failed to submit probe answer');
+    if (!res.ok) {
+      const errData = await res.json().catch(() => null);
+      throw new Error(errData?.detail || `HTTP ${res.status}: Failed to submit probe answer`);
+    }
     return res.json();
   },
 

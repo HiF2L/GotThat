@@ -20,7 +20,7 @@ from app.schemas.tutor import (
     DAGNodeSchema,
     DAGEdgeSchema,
 )
-from app.services.tutor.probe_phase import probe_manager
+from app.services.tutor.probe_phase import probe_manager, validate_question_suite_schema
 from app.services.tutor.plan_phase import plan_manager
 from app.services.tutor.step_executor import step_executor
 from app.services.graph.knowledge_graph import knowledge_graph_service, deterministic_topological_sort
@@ -519,6 +519,9 @@ class TutorStateMachine:
                 existing_session.depth_level = request.depth_level
             elif track_depth:
                 existing_session.depth_level = track_depth
+            # Self-healing: if suite is missing or invalid, generate it now
+            if not validate_question_suite_schema((existing_session.probing_state or {}).get("suite", [])):
+                await probe_manager.initialize_suite_if_needed(session, existing_session)
             await session.commit()
             return existing_session
 

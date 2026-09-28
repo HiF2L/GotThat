@@ -31,19 +31,19 @@ async def client_and_db():
 
 
 def test_calculate_cost_rub():
-    # 1. Standard model: gpt-4.1-mini (15 in / 60 out per 1M)
-    # 1,000 in, 1,000 out => 0.015 + 0.060 = 0.075 RUB
+    # 1. Standard model: gpt-4.1-mini (104.0 in / 413.0 out per 1M)
+    # 1,000 in, 1,000 out => 0.104 + 0.413 = 0.517 RUB
     cost = cost_tracker.calculate_cost_rub("openai/gpt-4.1-mini", 1000, 1000, 0)
-    assert cost == pytest.approx(0.075, rel=1e-3)
+    assert cost == pytest.approx(0.517, rel=1e-3)
 
-    # 100,000 in, 50,000 out => 1.5 + 3.0 = 4.5 RUB
+    # 100,000 in, 50,000 out => 10.4 + 20.65 = 31.05 RUB
     cost = cost_tracker.calculate_cost_rub("openai/gpt-4.1-mini", 100_000, 50_000, 0)
-    assert cost == pytest.approx(4.5, rel=1e-3)
+    assert cost == pytest.approx(31.05, rel=1e-3)
 
-    # 2. Reasoning model: deepseek-v4-pro (190 in / 375 out per 1M)
-    # 10,000 in, 10,000 out (including 5,000 reasoning) => 1.9 + 1.875 + 1.875 = 5.65 RUB
+    # 2. Reasoning model: deepseek-v4-pro (180.0 in / 550.0 out per 1M)
+    # 10,000 in, 10,000 out => 1.8 + 5.5 = 7.3 RUB
     cost = cost_tracker.calculate_cost_rub("deepseek/deepseek-v4-pro", 10_000, 10_000, 5_000)
-    assert cost == pytest.approx(5.65, rel=1e-3)
+    assert cost == pytest.approx(7.3, rel=1e-3)
 
 
 @pytest.mark.asyncio

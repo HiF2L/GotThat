@@ -16,6 +16,7 @@ from app.schemas.tutor import (
 )
 from app.services.tutor.tutor_state_machine import tutor_state_machine
 from app.services.tutor.step_executor import step_executor
+from app.services.tutor.probe_phase import probe_manager
 from app.models.session import DeepLearningSession, DeepSessionStep
 from app.models.ontology import Concept, Track
 from app.models.mastery import User
@@ -217,6 +218,24 @@ async def get_active_session(
         if cached_step_dict:
             break
 
+    probing_question = None
+    if sess.status == "probing":
+        try:
+            probed_nodes = (sess.probing_state or {}).get("probed_nodes", [])
+            probing_question = await probe_manager.get_next_probe_question(
+                session=db,
+                user_id=sess.user_id,
+                target_concept_id=sess.target_concept_id,
+                probed_concept_ids=probed_nodes,
+                deep_session=sess,
+            )
+            # If all questions answered, transition to planning
+            if not probing_question:
+                sess.status = "planning"
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Failed to fetch probe question in active-session for session {sess.id}: {e}")
+
     return {
         "session_id": sess.id,
         "status": sess.status,
@@ -227,6 +246,7 @@ async def get_active_session(
         "language": sess.language,
         "depth_level": sess.depth_level,
         "cached_step": cached_step_dict,
+        "probing_question": probing_question,
     }
 
 
