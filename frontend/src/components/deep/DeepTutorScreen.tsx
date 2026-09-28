@@ -99,15 +99,21 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   }, [loading]);
 
   const loadedTargetRef = useRef<string | undefined>(undefined);
+  const loadedSkipProbingRef = useRef<boolean | undefined>(undefined);
   const isNavigatingRef = useRef<boolean>(false);
   const isStartingSessionRef = useRef<boolean>(false);
 
-  // Lazy & idempotent session start (only triggered when tab is active and target has changed)
+  // Lazy & idempotent session start (triggered when tab is active and target or mode has changed)
   useEffect(() => {
     if (!isActive || !targetConceptId) return;
 
-    if (targetConceptId !== loadedTargetRef.current) {
+    const targetChanged = targetConceptId !== loadedTargetRef.current;
+    const skipProbingChanged =
+      loadedSkipProbingRef.current !== undefined && loadedSkipProbingRef.current !== skipProbing;
+
+    if (targetChanged || skipProbingChanged || (!sessionId && !isStartingSessionRef.current)) {
       const isAlreadyActive =
+        !skipProbingChanged &&
         currentStep &&
         (currentStep.concept_id === targetConceptId ||
           currentStep.concept_slug === targetConceptId ||
@@ -116,10 +122,9 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
 
       if (!isAlreadyActive && !isStartingSessionRef.current) {
         loadedTargetRef.current = targetConceptId;
+        loadedSkipProbingRef.current = skipProbing;
         startSession(targetConceptId, skipProbing);
       }
-    } else if (!sessionId && !isStartingSessionRef.current) {
-      startSession(targetConceptId, skipProbing);
     }
   }, [targetConceptId, isActive, skipProbing]);
 
@@ -147,7 +152,14 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
       const effectiveSkipProbing =
         overrideSkipProbing !== undefined
           ? overrideSkipProbing
-          : Boolean(skipProbing || localStorage.getItem('got_it_deep_skip_probing') === 'true');
+          : (skipProbing !== undefined ? skipProbing : localStorage.getItem('got_it_deep_skip_probing') === 'true');
+      loadedSkipProbingRef.current = effectiveSkipProbing;
+      localStorage.setItem('got_it_deep_skip_probing', String(effectiveSkipProbing));
+
+      if (effectiveSkipProbing) {
+        setProbeQuestion(null);
+        setSelectedProbeOptionId(null);
+      }
 
       // 0. Fast-path active session & cached step restoration on reload
       try {
@@ -189,6 +201,16 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               return;
             }
           }
+        } else if (activeSess && activeSess.status === 'probing' && !effectiveSkipProbing) {
+          setSessionId(activeSess.session_id);
+          if (targetKey) {
+            localStorage.setItem(`got_it_session_${targetKey}`, activeSess.session_id);
+          }
+          localStorage.setItem('got_it_active_session_id', activeSess.session_id);
+          setCurrentPhase('probing');
+          setLoading(false);
+          isStartingSessionRef.current = false;
+          return;
         }
       } catch (cacheErr) {
         console.debug('Fast session recovery notice:', cacheErr);
@@ -239,8 +261,15 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
               setStreamingContent('');
               setStreamingThoughts('');
             },
-            onProbing: (action) => {
-              handleTutorActionResponse(action);
+            onProbing: (action, sid) => {
+              if (sid) {
+                setSessionId(sid);
+                if (targetKey) {
+                  localStorage.setItem(`got_it_session_${targetKey}`, sid);
+                }
+                localStorage.setItem('got_it_active_session_id', sid);
+              }
+              handleTutorActionResponse(action, sid);
             },
             onError: (err) => {
               console.warn('streamCurriculum error, fallback to startDeepSession:', err);
@@ -576,9 +605,19 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
   };
 
   const handleAnswerProbe = async (chosenOptionId: string) => {
-    if (!sessionId) return;
+    const targetKey = targetConceptId ? targetConceptId.toLowerCase().trim() : '';
+    const currentSid =
+      sessionId ||
+      (targetKey ? localStorage.getItem(`got_it_session_${targetKey}`) : null) ||
+      localStorage.getItem('got_it_active_session_id');
+
+    if (!currentSid) {
+      console.warn('No active session ID for probe answer, restarting session...');
+      startSession(targetConceptId, false);
+      return;
+    }
     if (chosenOptionId === 'generate_plan_now') {
-      streamSessionPlan(sessionId);
+      streamSessionPlan(currentSid);
       return;
     }
     setSelectedProbeOptionId(chosenOptionId);
@@ -588,16 +627,27 @@ export const DeepTutorScreen: React.FC<DeepTutorScreenProps> = ({
     try {
       const qId = probeQuestion ? (probeQuestion.card_id || probeQuestion.id || probeQuestion.concept_id) : '';
       const action = await apiClient.submitProbeAnswer(
-        sessionId,
+        currentSid,
         qId,
         chosenOptionId,
         probeNote,
       );
       setSelectedProbeOptionId(null);
       setProbeNote(''); // Clear for next question
-      handleTutorActionResponse(action, sessionId);
-    } catch (err) {
+      handleTutorActionResponse(action, currentSid);
+    } catch (err: any) {
       console.error('Failed to submit probe answer:', err);
+      const errStr = String(err?.message || err);
+      if (errStr.includes('Session not found') || errStr.includes('404') || errStr.includes('500')) {
+        console.warn('Probe session invalid or expired, resetting session...');
+        if (targetKey) {
+          localStorage.removeItem(`got_it_session_${targetKey}`);
+        }
+        localStorage.removeItem('got_it_active_session_id');
+        setSessionId(null);
+        startSession(targetConceptId, skipProbing);
+        return;
+      }
       alert('Failed to submit diagnostic answer. Please retry.');
       setLoading(false);
     }

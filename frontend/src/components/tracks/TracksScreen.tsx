@@ -202,6 +202,12 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
   };
 
   const handleTrackCreated = async (newTrack: TrackSummary, startMode: 'quiz' | 'direct' = 'quiz') => {
+    const trackSlug = newTrack.slug ? newTrack.slug.toLowerCase().trim() : '';
+    const trackId = newTrack.track_id ? newTrack.track_id.toLowerCase().trim() : '';
+    if (trackSlug) localStorage.removeItem(`got_it_session_${trackSlug}`);
+    if (trackId) localStorage.removeItem(`got_it_session_${trackId}`);
+    localStorage.removeItem('got_it_active_session_id');
+
     await loadData();
     // Immediately open Deep Tutor in user's chosen start mode!
     onSelectTrackForDeepStudy(
@@ -225,7 +231,14 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
     }
     setIsDeleting(true);
     try {
+      const trackToDelete = tracks.find((t) => t.track_id === trackId || t.slug === trackId);
       await apiClient.deleteTrack(trackId);
+      if (trackToDelete?.slug) {
+        localStorage.removeItem(`got_it_session_${trackToDelete.slug.toLowerCase().trim()}`);
+      }
+      localStorage.removeItem(`got_it_session_${trackId.toLowerCase().trim()}`);
+      localStorage.removeItem('got_it_active_session_id');
+      localStorage.removeItem('got_it_deep_concept_id');
       setSelectedTrackId(null);
       await loadData();
     } catch (err) {
@@ -1114,7 +1127,9 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
                   <button
                     onClick={() => {
                       const target = selectedTrack.slug || selectedTrack.track_id;
-                      onSelectTrackForDeepStudy(target, selectedTrack.track_id, false);
+                      const hasExistingCurriculum =
+                        (masteryOverview?.concepts?.length || 0) > 1 || (masteryOverview?.mastered_concepts || 0) > 0;
+                      onSelectTrackForDeepStudy(target, selectedTrack.track_id, hasExistingCurriculum);
                     }}
                     className="flex-1 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm sm:text-base rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-2.5 transition-all cursor-pointer"
                   >
@@ -1165,7 +1180,7 @@ export const TracksScreen: React.FC<TracksScreenProps> = ({
                         return (
                           <div
                             key={concept.concept_id}
-                            onClick={() => onSelectTrackForDeepStudy(concept.slug || concept.concept_id, selectedTrack.track_id)}
+                            onClick={() => onSelectTrackForDeepStudy(concept.slug || concept.concept_id, selectedTrack.track_id, true)}
                             className={`p-4 rounded-2xl border transition-all flex items-center justify-between gap-3 cursor-pointer ${
                               isCurrentActive
                                 ? 'bg-indigo-950/80 border-indigo-400 shadow-xl shadow-indigo-600/20 ring-2 ring-indigo-500/50'

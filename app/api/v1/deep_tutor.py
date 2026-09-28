@@ -423,6 +423,8 @@ async def submit_probe_answer(
         )
     except Exception as e:
         logger.error(f"Error recording probe answer for session {request.session_id}: {e}", exc_info=True)
+        if "Session not found" in str(e):
+            raise HTTPException(status_code=404, detail="Session not found")
         raise HTTPException(status_code=500, detail=f"Failed to record diagnostic answer: {e}")
 
 

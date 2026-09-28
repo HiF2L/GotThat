@@ -40,6 +40,8 @@ export const CreateTrackModal: React.FC<CreateTrackModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setSelectedFolderId(initialFolderId || '');
+      setStartMode('direct');
+      setErrorMessage(null);
     }
   }, [isOpen, initialFolderId]);
 

@@ -618,7 +618,7 @@ export const apiClient = {
       onStatus?: (message: string) => void;
       onToken?: (token: string) => void;
       onStepReady?: (step: DeepStep) => void;
-      onProbing?: (action: any) => void;
+      onProbing?: (action: any, sessionId?: string) => void;
       onError?: (err: any) => void;
     },
     sessionId?: string,
@@ -681,7 +681,7 @@ export const apiClient = {
             } else if (event.type === 'ready' && callbacks?.onStepReady) {
               callbacks.onStepReady(event.step);
             } else if (event.type === 'probing' && callbacks?.onProbing) {
-              callbacks.onProbing(event.action);
+              callbacks.onProbing(event.action, event.session_id);
             } else if (event.type === 'error' && callbacks?.onError) {
               callbacks.onError(new Error(event.error));
             }
